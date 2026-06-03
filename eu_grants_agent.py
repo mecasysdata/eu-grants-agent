@@ -1,14 +1,10 @@
+import requests
 import time
 import smtplib
 import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
 EMAIL_HESLO       = "jeze ycaa dpty cvll"
@@ -24,21 +20,6 @@ KLUCOVE_SLOVA = [
     "data-driven", "predictive", "smart manufacturing",
 ]
 
-PORTAL_URL = "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/calls-for-proposals?isExactMatch=true&status=31094501,31094502&order=DESC&pageNumber=1&pageSize=50&sortBy=startDate"
-
-def vytvor_driver():
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    driver = webdriver.Chrome(options=options)
-    driver.implicitly_wait(10)
-    return driver
-
-
 def obsahuje_klucove_slovo(text):
     text_lower = text.lower()
     for slovo in KLUCOVE_SLOVA:
@@ -46,191 +27,292 @@ def obsahuje_klucove_slovo(text):
             return slovo
     return None
 
-
-def ziskaj_vyzvy(driver):
-    print("Otváram EU Funding Portal...")
-    driver.get(PORTAL_URL)
-    time.sleep(5)
-
-    # Zavrieme cookie banner ak existuje
-    try:
-        cookie_btn = driver.find_element(By.XPATH, "//button[contains(text(),'Accept') or contains(text(),'accept') or contains(text(),'Súhlasím')]")
-        cookie_btn.click()
-        time.sleep(2)
-        print("Cookie banner zavretý.")
-    except:
-        pass
-
+def ziskaj_vyzvy():
+    print("Stahujem zoznam vyziev cez EC Search API...")
     vyzvy = []
     strana = 1
+    na_stranku = 50
+
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0",
+    }
 
     while True:
-        print("Spracovávam stranu {}...".format(strana))
-        time.sleep(3)
+        # Oficialny EC Search API endpoint
+        url = "https://api.tech.ec.europa.eu/search-api/prod/rest/search"
+        params = {
+            "apiKey": "PGENMD98pp",
+            "text": "*",
+            "pageSize": na_stranku,
+            "pageNumber": strana,
+            "sortBy": "startDate",
+            "order": "DESC",
+        }
 
-        # Nájdi všetky výzvy na stránke - modré nadpisy v rámčekoch
+        # Pridame filter na status ako query parameter
+        query = {
+            "bool": {
+                "must": [
+                    {"terms": {"status": ["31094501", "31094502"]}}
+                ]
+            }
+        }
+
         try:
-            WebDriverWait(driver, 15).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a.eui-link, .topic-item a, .call-item a, h2 a, h3 a"))
-            )
-        except:
-            print("Timeout pri čakaní na výzvy.")
+            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            print("API status: {}".format(resp.status_code))
 
-        # Skús rôzne selektory pre nadpisy výziev
-        linky = []
-        for selektor in [
-            "eui-card__title a",
-            ".topic-item__title a",
-            "a.ng-star-inserted",
-            ".call-title a",
-            "h2 a[href*='topic-details']",
-            "a[href*='topic-details']",
-        ]:
-            linky = driver.find_elements(By.CSS_SELECTOR, selektor)
-            if linky:
-                print("Nájdených {} výziev cez selektor: {}".format(len(linky), selektor))
+            if resp.status_code != 200:
+                print("Skusam alternativny endpoint...")
                 break
 
-        if not linky:
-            # Pokus cez XPath
-            linky = driver.find_elements(By.XPATH, "//a[contains(@href,'topic-details')]")
-            print("Nájdených {} výziev cez XPath".format(len(linky)))
+            data = resp.json()
+            polozky = data.get("results", [])
+            celkovo = data.get("total", {})
+            if isinstance(celkovo, dict):
+                celkovo = celkovo.get("value", 0)
 
-        if not linky:
-            print("Žiadne výzvy nenájdené na strane {}. Screenshot debug:".format(strana))
-            print("URL: {}".format(driver.current_url))
-            print("Title: {}".format(driver.title))
-            break
+            print("Strana {}: najdenych {} poloziek z celkovo {}".format(strana, len(polozky), celkovo))
 
-        # Zberi info o každej výzve na tejto strane
-        for link in linky:
-            try:
-                nazov = link.text.strip()
-                href = link.get_attribute("href") or ""
-                if nazov and href:
-                    vyzvy.append({"nazov": nazov, "link": href})
-            except:
-                pass
+            for p in polozky:
+                md = p.get("metadata", {})
 
-        print("Celkovo výziev doteraz: {}".format(len(vyzvy)))
+                # Ziskaj identifier
+                identifier = md.get("identifier", [""])
+                if isinstance(identifier, list):
+                    identifier = identifier[0] if identifier else ""
+                identifier = str(identifier)
 
-        # Skús prejsť na ďalšiu stranu
-        try:
-            next_btn = driver.find_element(By.XPATH,
-                "//button[@aria-label='Next page' or @aria-label='next' or contains(@class,'next') or contains(text(),'Next')]"
-            )
-            if next_btn.is_enabled() and next_btn.is_displayed():
-                next_btn.click()
-                strana += 1
-                time.sleep(3)
-            else:
-                print("Tlačidlo Next nie je aktívne - koniec zoznamu.")
+                # Ziskaj nazov
+                nazov = md.get("title", [""])
+                if isinstance(nazov, list):
+                    nazov = nazov[0].get("value", "") if nazov and isinstance(nazov[0], dict) else (nazov[0] if nazov else "")
+                nazov = str(nazov)
+
+                # Ziskaj status
+                status = md.get("statusLabel", [""])
+                if isinstance(status, list):
+                    status = status[0] if status else ""
+                status = str(status)
+
+                # Filter - chceme len Forthcoming a Open
+                if status not in ["Forthcoming", "Open for submission"]:
+                    continue
+
+                # Ziskaj deadline
+                deadline = md.get("deadlineDate", [""])
+                if isinstance(deadline, list):
+                    deadline = deadline[0] if deadline else ""
+                deadline = str(deadline)[:10]
+
+                # Ziskaj programme
+                programme = md.get("programmeName", [""])
+                if isinstance(programme, list):
+                    programme = programme[0] if programme else ""
+                programme = str(programme)
+
+                if identifier:
+                    link = "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/{}".format(identifier)
+                    vyzvy.append({
+                        "nazov": nazov,
+                        "identifier": identifier,
+                        "status": status,
+                        "deadline": deadline,
+                        "programme": programme,
+                        "link": link,
+                    })
+
+            if len(polozky) < na_stranku or len(vyzvy) >= int(celkovo or 0):
                 break
-        except:
-            print("Tlačidlo Next nenájdené - koniec zoznamu.")
+
+            strana += 1
+            time.sleep(0.5)
+
+        except Exception as e:
+            print("Chyba pri API: {}".format(e))
             break
 
-        if strana > 30:  # Bezpečnostný limit
+    # Ak API nevratilo nic, skus priamy endpoint
+    if not vyzvy:
+        print("Skusam priamy EC topics endpoint...")
+        vyzvy = ziskaj_vyzvy_priamo()
+
+    print("Celkovo vyziev na spracovanie: {}".format(len(vyzvy)))
+    return vyzvy
+
+
+def ziskaj_vyzvy_priamo():
+    """Zalohy endpoint - priamy EC API"""
+    vyzvy = []
+    headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+
+    for strana in range(1, 21):
+        url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topicMgmt/topics"
+        params = {
+            "status": "31094501,31094502",
+            "pageNumber": strana,
+            "pageSize": 50,
+            "sortBy": "startDate",
+            "order": "DESC",
+        }
+        try:
+            resp = requests.get(url, params=params, headers=headers, timeout=30)
+            print("Priamy API strana {}: status {}".format(strana, resp.status_code))
+            data = resp.json()
+
+            # Skus rozne kluce
+            polozky = (data.get("fundingOpportunities", {}).get("fundingOpportunity", []) or
+                      data.get("topics", []) or
+                      data.get("results", []) or
+                      data.get("items", []))
+
+            if not polozky:
+                print("Obsah odpovede: {}".format(str(data)[:300]))
+                break
+
+            for p in polozky:
+                identifier = str(p.get("identifier", p.get("id", p.get("topicId", ""))))
+                nazov = p.get("title", p.get("name", p.get("topicTitle", "")))
+                if isinstance(nazov, dict):
+                    nazov = nazov.get("value", "")
+                nazov = str(nazov)
+                status = str(p.get("statusLabel", p.get("status", "")))
+                deadline = str(p.get("deadlineDate", p.get("deadline", "")))[:10]
+                programme = str(p.get("programmeName", p.get("programme", "")))
+
+                if identifier:
+                    link = "https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/topic-details/{}".format(identifier)
+                    vyzvy.append({
+                        "nazov": nazov,
+                        "identifier": identifier,
+                        "status": status,
+                        "deadline": deadline,
+                        "programme": programme,
+                        "link": link,
+                    })
+
+            print("  Najdenych {} vyziev (celkom {})".format(len(polozky), len(vyzvy)))
+
+            celkovo = data.get("total", data.get("totalElements", data.get("count", 0)))
+            if isinstance(celkovo, dict):
+                celkovo = celkovo.get("value", 0)
+            if len(vyzvy) >= int(celkovo or 0) or len(polozky) < 50:
+                break
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            print("Chyba priamy endpoint strana {}: {}".format(strana, e))
             break
 
     return vyzvy
 
 
-def skontroluj_vyzvu(driver, vyzva):
-    print("Otvaram: {}...".format(vyzva['nazov'][:60]))
+def ziskaj_detail_vyzvy(identifier):
+    """Stiahne detail konkretnej vyzvy"""
+    url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topicMgmt/topics/{}".format(identifier)
     try:
-        driver.get(vyzva['link'])
-        time.sleep(3)
-
-        # Zober celý text stránky
-        try:
-            obsah = driver.find_element(By.TAG_NAME, "body").text
-        except:
-            obsah = ""
-
-        klucove_slovo = obsahuje_klucove_slovo(obsah)
-
-        if klucove_slovo:
-            # Skús získať Topic description sekciu
-            popis = ""
-            for selektor in [
-                "[data-cy='topic-description']",
-                ".topic-description",
-                "#topic-description",
-                "eui-tab[label*='Description'] div",
-                "div.description",
-            ]:
-                try:
-                    el = driver.find_element(By.CSS_SELECTOR, selektor)
-                    popis = el.text[:1500]
-                    break
-                except:
-                    pass
-
-            if not popis:
-                popis = obsah[:1500]
-
-            return klucove_slovo, popis
-
+        resp = requests.get(url, timeout=30,
+                           headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200:
+            return resp.json()
     except Exception as e:
-        print("Chyba pri otvarani vyzvy: {}".format(e))
+        print("  Chyba detail {}: {}".format(identifier, e))
+    return {}
 
-    return None, ""
 
+def vytvor_zhrnutie(nazov, detail, identifier):
+    md = detail.get("metadata", detail)
 
-def vytvor_zhrnutie(nazov, popis, link):
-    popis_cistý = re.sub(r'\s+', ' ', popis).strip()
-    vety = re.split(r'(?<=[.!?])\s+', popis_cistý)
-    relevantne = [v for v in vety if len(v) > 40][:3]
+    popis_raw = ""
+    for kluc in ["topicDesc", "description", "objectives", "summary", "expectedOutcome"]:
+        val = md.get(kluc, "")
+        if isinstance(val, list):
+            val = " ".join([v.get("value", "") if isinstance(v, dict) else str(v) for v in val])
+        if val and len(str(val)) > 50:
+            popis_raw = str(val)
+            break
 
-    zhrnutie = "Vyzva '{}'. ".format(nazov[:100])
-    if relevantne:
-        zhrnutie += " ".join(relevantne[:3])
-    else:
-        zhrnutie += "Vyzva obsahuje relevantne klucove slova pre Industry 4.0/5.0 a digitalne technologie."
+    popis = re.sub(r"<[^>]+>", " ", popis_raw)
+    popis = re.sub(r"\s+", " ", popis).strip()
 
-    return zhrnutie[:800]
+    programme = md.get("programmeName", "Horizon Europe")
+    if isinstance(programme, list):
+        programme = programme[0] if programme else "Horizon Europe"
+
+    deadline = str(md.get("deadlineDate", ""))[:10]
+    if isinstance(md.get("deadlineDate"), list):
+        l = md["deadlineDate"]
+        deadline = str(l[0])[:10] if l else ""
+
+    action_type = md.get("typeOfAction", "")
+    if isinstance(action_type, list):
+        action_type = action_type[0] if action_type else ""
+
+    vety = ["Vyzva {} - '{}' je sucastou programu {}.".format(identifier, nazov[:120], programme)]
+
+    if popis:
+        popis_vety = re.split(r'(?<=[.!?])\s+', popis)
+        relevantne = [v for v in popis_vety if len(v) > 40][:2]
+        for v in relevantne:
+            vety.append(v[:350] + ("..." if len(v) > 350 else ""))
+
+    if action_type:
+        vety.append("Typ akcie: {}.".format(action_type))
+    if deadline:
+        vety.append("Uzavierka podavania ziadosti: {}.".format(deadline))
+    if len(vety) < 3:
+        vety.append("Vyzva sa zameriava na inovativne technologie v oblasti digitalnej transformacie, AI a priemyslu.")
+
+    return " ".join(vety[:6])
 
 
 def posli_email(najdene_vyzvy, celkovo_vyziev):
     msg = MIMEMultipart("alternative")
     datum = datetime.now().strftime('%d.%m.%Y')
     if najdene_vyzvy:
-        msg["Subject"] = "EU Granty {} - Nove vyzvy najdene!".format(datum)
+        msg["Subject"] = "EU Granty {} - {} relevantnych vyziev!".format(datum, len(najdene_vyzvy))
     else:
         msg["Subject"] = "EU Granty {} - Ziadne nove vyzvy".format(datum)
     msg["From"] = EMAIL_ODOSIELATEL
     msg["To"] = EMAIL_PRIJEMCA
 
     if not najdene_vyzvy:
-        text = "Prepac Majka, nic som nenasel.\n\nPrehliadol som {} vyziev a ziadna neobsahovala relevantne klucove slova (Industry 4.0/5.0, AI, automatizacia...).".format(celkovo_vyziev)
+        text = "Prepac Majka, nic som nenasel.\n\nPrehliadol som {} vyziev (Forthcoming + Open for submission) a ziadna neobsahovala relevantne klucove slova (Industry 4.0/5.0, AI, automatizacia...).".format(celkovo_vyziev)
         html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
         <h2 style="color:#003399;">EU Granty - Tyzdenny prehlad</h2>
         <p>Prepac Majka, nic som nenasel.</p>
-        <p style="color:#666;">Prehliadol som <strong>{}</strong> vyziev a ziadna neobsahovala relevantne klucove slova tykajuce sa Industry 4.0/5.0, AI alebo automatizacie.</p>
+        <p style="color:#666;">Prehliadol som <strong>{}</strong> vyziev (Forthcoming + Open for submission) a ziadna neobsahovala relevantne klucove slova tykajuce sa Industry 4.0/5.0, AI alebo automatizacie.</p>
         </body></html>""".format(celkovo_vyziev)
     else:
         pocet = len(najdene_vyzvy)
         text_vyzvy = ""
         html_vyzvy = ""
         for i, v in enumerate(najdene_vyzvy, 1):
-            text_vyzvy += "\n{}\n{}. {}\n\n{}\n\nLink: {}\n".format("="*60, i, v['nazov'], v['zhrnutie'], v['link'])
+            text_vyzvy += "\n{}\n{}. {}\n\n{}\n\nLink: {}\n".format(
+                "="*60, i, v['nazov'], v['zhrnutie'], v['link'])
             html_vyzvy += """
-            <div style="border:1px solid #ddd;border-radius:8px;padding:20px;margin-bottom:20px;">
+            <div style="border:1px solid #ddd;border-radius:8px;padding:20px;margin-bottom:20px;background:#fafafa;">
                 <h3 style="color:#003399;margin-top:0;">{}. {}</h3>
                 <p style="color:#333;line-height:1.7;">{}</p>
-                <a href="{}" style="background:#003399;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;display:inline-block;margin-top:8px;">
-                    Otvorit vyzvu
+                <a href="{}" style="background:#003399;color:white;padding:10px 20px;
+                   text-decoration:none;border-radius:5px;display:inline-block;margin-top:8px;font-weight:bold;">
+                   Otvorit vyzvu &rarr;
                 </a>
                 <p style="color:#999;font-size:12px;margin-top:12px;">
-                    Klucove slovo: <strong>{}</strong>
+                    Klucove slovo: <strong>{}</strong> &nbsp;|&nbsp;
+                    Status: {} &nbsp;|&nbsp; Deadline: {}
                 </p>
-            </div>""".format(i, v['nazov'], v['zhrnutie'], v['link'], v.get('klucove_slovo', ''))
+            </div>""".format(
+                i, v['nazov'], v['zhrnutie'], v['link'],
+                v.get('klucove_slovo',''), v.get('status',''), v.get('deadline','N/A'))
 
-        text = "Ahoj Majka!\n\nNasel som {} relevantne vyzvy z celkovo {}:\n{}\nAgent EU Grantov".format(pocet, celkovo_vyziev, text_vyzvy)
+        text = "Ahoj Majka!\n\nNasel som {} relevantnych vyziev z {} prehliadanych:\n{}\nAgent EU Grantov".format(
+            pocet, celkovo_vyziev, text_vyzvy)
         html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
         <h2 style="color:#003399;">EU Granty - Nove relevantne vyzvy</h2>
-        <p>Ahoj Majka! Nasel som <strong>{}</strong> relevantne vyzvy z celkovo {} prehliadanych:</p>
+        <p>Ahoj Majka! Nasel som <strong>{}</strong> relevantnych vyziev z {} prehliadanych:</p>
         {}
         <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;padding-top:10px;margin-top:20px;">
             Automaticky vygenerovane agentom EU Grantov - {}
@@ -251,46 +333,53 @@ def posli_email(najdene_vyzvy, celkovo_vyziev):
 
 def main():
     print("=" * 60)
-    print("EU GRANTS AGENT - Spusteny (Selenium verzia)")
+    print("EU GRANTS AGENT - Spusteny")
     print("Datum: {}".format(datetime.now().strftime('%d.%m.%Y %H:%M')))
     print("=" * 60)
 
-    driver = vytvor_driver()
+    vyzvy = ziskaj_vyzvy()
 
-    try:
-        # Krok 1: Zober zoznam vyziev
-        vyzvy = ziskaj_vyzvy(driver)
+    if not vyzvy:
+        print("Ziadne vyzvy sa nepodarilo stiahnut.")
+        posli_email([], 0)
+        return
 
-        if not vyzvy:
-            print("Ziadne vyzvy nenajdene.")
-            posli_email([], 0)
-            return
+    najdene = []
+    print("\nPrehlidam {} vyziev...".format(len(vyzvy)))
 
-        print("\nNajdeno {} vyziev, prehlidam obsah...".format(len(vyzvy)))
+    for idx, vyzva in enumerate(vyzvy, 1):
+        print("[{}/{}] {}...".format(idx, len(vyzvy), vyzva['identifier'][:40]), end="", flush=True)
 
-        # Krok 2: Otvor kazdu vyzvu a hladaj klucove slova
-        najdene = []
-        for idx, vyzva in enumerate(vyzvy, 1):
-            print("[{}/{}]".format(idx, len(vyzvy)), end=" ", flush=True)
-            klucove_slovo, popis = skontroluj_vyzvu(driver, vyzva)
+        # Skontroluj nazov
+        klucove_slovo = obsahuje_klucove_slovo(vyzva["nazov"])
+        detail = {}
 
-            if klucove_slovo:
-                print("NAJDENE: '{}'".format(klucove_slovo))
-                zhrnutie = vytvor_zhrnutie(vyzva['nazov'], popis, vyzva['link'])
-                najdene.append({
-                    **vyzva,
-                    "zhrnutie": zhrnutie,
-                    "klucove_slovo": klucove_slovo
-                })
-            else:
-                print("-")
+        # Ak nie je v nazve, stiahni detail a skontroluj popis
+        if not klucove_slovo:
+            detail = ziskaj_detail_vyzvy(vyzva["identifier"])
+            popis = ""
+            md = detail.get("metadata", detail)
+            for kluc in ["topicDesc", "description", "objectives", "summary", "expectedOutcome"]:
+                val = md.get(kluc, "")
+                if isinstance(val, list):
+                    val = " ".join([v.get("value", "") if isinstance(v, dict) else str(v) for v in val])
+                if val:
+                    popis += " " + str(val)
+            klucove_slovo = obsahuje_klucove_slovo(popis)
+            time.sleep(0.3)
 
-        print("\nVysledok: {} relevantnych z {}".format(len(najdene), len(vyzvy)))
-        posli_email(najdene, len(vyzvy))
+        if klucove_slovo:
+            print(" NAJDENE: '{}'".format(klucove_slovo))
+            if not detail:
+                detail = ziskaj_detail_vyzvy(vyzva["identifier"])
+            zhrnutie = vytvor_zhrnutie(vyzva["nazov"], detail, vyzva["identifier"])
+            najdene.append({**vyzva, "zhrnutie": zhrnutie, "klucove_slovo": klucove_slovo})
+        else:
+            print(" -")
 
-    finally:
-        driver.quit()
-        print("Agent dokoncil pracu!")
+    print("\nVysledok: {} relevantnych vyziev z {}".format(len(najdene), len(vyzvy)))
+    posli_email(najdene, len(vyzvy))
+    print("Agent dokoncil pracu!")
 
 
 if __name__ == "__main__":
