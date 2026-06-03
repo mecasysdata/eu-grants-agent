@@ -1,9 +1,11 @@
 """
 EU Grants Agent
-- Stiahne zoznam vyziev z EC Funding Portal
-- Filtruje len aktualne (2024-2027) a Forthcoming/Open
-- Hlada klucove slova v popise
-- Posle email Majke
+- Stiahne zoznam vyziev z EC Funding Portal (topic-list.html)
+- Filtruje len 2025/2026/2027 identifikatory
+- Pre kazdu stiahne JSON detail
+- Skontroluje ci deadline je v buducnosti (= skutocne otvorena/forthcoming)
+- Hlada klucove slova v nazve + popise + keywords
+- Posle email Majke s vysledkami
 """
 
 import requests
@@ -12,7 +14,7 @@ import smtplib
 import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timezone
 
 # === KONFIG ===
 EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
@@ -29,9 +31,7 @@ KLUCOVE_SLOVA = [
     "data-driven", "predictive", "smart manufacturing",
 ]
 
-# Roky ktore nas zaujimaju - len aktualne vyzvy
-AKTUALNE_ROKY = ["2024", "2025", "2026", "2027"]
-
+AKTUALNE_ROKY = ["2025", "2026", "2027"]
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"}
 # ==============
 
@@ -43,26 +43,21 @@ def obsahuje_klucove_slovo(text):
     return None
 
 def ziskaj_identifikatory():
-    """Stiahne topic-list.html a filtruje len aktualne identifikatory (2024-2027)"""
     print("Stahujem topic-list.html...")
     url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topic-list.html"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         vsetky = re.findall(r'topic-details/([a-zA-Z0-9_\-\.]+)', resp.text)
-        vsetky = list(dict.fromkeys(vsetky))  # unique
-
-        # Filtruj len aktualne roky
+        vsetky = list(dict.fromkeys(vsetky))
         aktualne = [i for i in vsetky if any(rok in i for rok in AKTUALNE_ROKY)]
-        print("Celkom identifikatorov: {} | Po filtri (2024-2027): {}".format(
-            len(vsetky), len(aktualne)))
+        print("Celkom: {} | Po filtri 2025-2027: {}".format(len(vsetky), len(aktualne)))
         return aktualne
     except Exception as e:
         print("CHYBA topic-list: {}".format(e))
         return []
 
 def ziskaj_detail(identifier):
-    """Stiahne JSON detail konkretnej vyzvy"""
     url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topicDetails/{}.json".format(
         identifier.lower())
     try:
@@ -74,18 +69,16 @@ def ziskaj_detail(identifier):
     return None
 
 def parsuj_vyzvu(detail, identifier):
-    """Extrahuje vsetky potrebne udaje z JSON detailu"""
     td = detail.get("TopicDetails", detail)
-
     nazov = td.get("title", "")
 
-    # Programme
     fp = td.get("frameworkProgramme", {})
     programme = fp.get("description", "") if isinstance(fp, dict) else str(fp)
 
     # Status a deadline z actions[]
     status = ""
-    deadline = ""
+    deadline_str = ""
+    deadline_ts = 0
     actions = td.get("actions", [])
     if actions:
         a = actions[0]
@@ -95,17 +88,16 @@ def parsuj_vyzvu(detail, identifier):
         dates = a.get("deadlineDates", [])
         if dates:
             try:
-                ts = int(str(dates[0])) / 1000
-                deadline = datetime.utcfromtimestamp(ts).strftime("%d.%m.%Y")
+                deadline_ts = int(str(dates[0])) / 1000
+                deadline_str = datetime.utcfromtimestamp(deadline_ts).strftime("%d.%m.%Y")
             except:
-                deadline = str(dates[0])[:10]
+                deadline_str = str(dates[0])[:10]
 
-    # Popis - vycisti HTML
+    # Popis
     popis_raw = td.get("description", "")
     popis = re.sub(r"<[^>]+>", " ", popis_raw)
     popis = re.sub(r"\s+", " ", popis).strip()
 
-    # Keywords a tags
     keywords = " ".join(td.get("keywords", []))
     tags = " ".join(td.get("tags", []))
 
@@ -114,13 +106,31 @@ def parsuj_vyzvu(detail, identifier):
         "nazov": nazov,
         "programme": programme,
         "status": status,
-        "deadline": deadline,
+        "deadline_str": deadline_str,
+        "deadline_ts": deadline_ts,
         "popis": popis,
         "fulltext": nazov + " " + popis + " " + keywords + " " + tags,
     }
 
+def je_aktualna(vyzva):
+    """Vrati True ak vyzva ma deadline v buducnosti ALEBO status Forthcoming"""
+    now_ts = datetime.now(timezone.utc).timestamp()
+
+    # Forthcoming - este neotvorena ale bude
+    if vyzva["status"] == "Forthcoming":
+        return True
+
+    # Open - otvorena a deadline este nenastal
+    if vyzva["status"] == "Open" and vyzva["deadline_ts"] > now_ts:
+        return True
+
+    # Fallback: ak deadline je v buducnosti bez ohladu na status
+    if vyzva["deadline_ts"] > now_ts:
+        return True
+
+    return False
+
 def vytvor_zhrnutie(v):
-    """5-6 vetove zhrnutie vyzvy"""
     vety = []
     vety.append("Vyzva '{}' ({}) je sucastou programu {}.".format(
         v["nazov"][:100], v["identifier"], v["programme"] or "Horizon Europe"))
@@ -131,15 +141,15 @@ def vytvor_zhrnutie(v):
         for s in relevantne:
             vety.append(s[:300] + ("..." if len(s) > 300 else ""))
 
-    if v["deadline"]:
-        vety.append("Uzavierka podavania ziadosti: {}.".format(v["deadline"]))
+    if v["deadline_str"]:
+        vety.append("Uzavierka podavania ziadosti: {}.".format(v["deadline_str"]))
 
     if len(vety) < 3:
         vety.append("Vyzva sa zameriava na inovativne technologie v oblasti AI a digitalnej transformacie.")
 
     return " ".join(vety[:6])
 
-def posli_email(najdene, celkovo_open):
+def posli_email(najdene, celkovo_aktualnych):
     msg = MIMEMultipart("alternative")
     datum = datetime.now().strftime("%d.%m.%Y")
 
@@ -153,17 +163,17 @@ def posli_email(najdene, celkovo_open):
     if not najdene:
         text = (
             "Prepac Majka, nic som nenasel.\n\n"
-            "Prehliadol som {} vyziev so statusom Forthcoming alebo Open "
+            "Prehliadol som {} aktualne vyziev (deadline v buducnosti) "
             "a ziadna neobsahovala relevantne klucove slova "
             "(Industry 4.0/5.0, AI, automatizacia...)."
-        ).format(celkovo_open)
+        ).format(celkovo_aktualnych)
         html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
 <h2 style="color:#003399;">EU Granty - Tyzdenny prehlad</h2>
 <p>Prepac Majka, nic som nenasel.</p>
-<p style="color:#555;">Prehliadol som <strong>{}</strong> vyziev (Forthcoming + Open)
+<p style="color:#555;">Prehliadol som <strong>{}</strong> aktualnych vyziev (s deadlinom v buducnosti)
 a ziadna neobsahovala relevantne klucove slova tykajuce sa Industry 4.0/5.0,
 AI alebo automatizacie.</p>
-</body></html>""".format(celkovo_open)
+</body></html>""".format(celkovo_aktualnych)
 
     else:
         pocet = len(najdene)
@@ -193,19 +203,19 @@ AI alebo automatizacie.</p>
   </p>
 </div>""".format(i=i, nazov=v["nazov"], zhrnutie=v["zhrnutie"],
                  link=link, kw=v["klucove_slovo"],
-                 status=v["status"], deadline=v.get("deadline","N/A"))
+                 status=v["status"], deadline=v.get("deadline_str","N/A"))
 
-        text = "Ahoj Majka!\n\nNasel som {} relevantnych vyziev z {} prehliadanych:\n{}\nAgent EU Grantov".format(
-            pocet, celkovo_open, bloky_text)
+        text = "Ahoj Majka!\n\nNasel som {} relevantnych vyziev z {} aktualnych:\n{}\nAgent EU Grantov".format(
+            pocet, celkovo_aktualnych, bloky_text)
         html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
 <h2 style="color:#003399;">EU Granty - Nove relevantne vyzvy</h2>
-<p>Ahoj Majka! Nasel som <strong>{pocet}</strong> relevantnych vyziev z {celkovo} prehliadanych:</p>
+<p>Ahoj Majka! Nasel som <strong>{pocet}</strong> relevantnych vyziev z {celkovo} aktualnych:</p>
 {bloky}
 <p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
           padding-top:10px;margin-top:20px;">
   Automaticky vygenerovane agentom EU Grantov - {datum}
 </p>
-</body></html>""".format(pocet=pocet, celkovo=celkovo_open,
+</body></html>""".format(pocet=pocet, celkovo=celkovo_aktualnych,
                          bloky=bloky_html,
                          datum=datetime.now().strftime("%d.%m.%Y %H:%M"))
 
@@ -234,12 +244,20 @@ def main():
         return
 
     najdene = []
-    open_count = 0
+    aktualnych = 0
     chyby = 0
+    start_time = time.time()
+    LIMIT_SEKUND = 45 * 60  # 45 minut - bezpecnostny limit
 
     print("Spracovavam {} identifikatorov...".format(len(identifikatory)))
 
     for idx, ident in enumerate(identifikatory, 1):
+
+        # Bezpecnostny timeout
+        if time.time() - start_time > LIMIT_SEKUND:
+            print("\nCasovy limit - posielam co mame ({}/{})".format(idx, len(identifikatory)))
+            break
+
         print("[{}/{}] {}".format(idx, len(identifikatory), ident[:50]), end=" ", flush=True)
 
         detail = ziskaj_detail(ident)
@@ -250,33 +268,32 @@ def main():
             continue
 
         vyzva = parsuj_vyzvu(detail, ident)
-        status = vyzva["status"]
 
-        # Chceme len Forthcoming a Open
-        if status not in ("Forthcoming", "Open"):
-            print("-> {}".format(status or "?"))
+        # Klucovy filter: chceme len vyzvy s deadlinom v buducnosti
+        if not je_aktualna(vyzva):
+            print("-> {} deadline: {}".format(vyzva["status"] or "?", vyzva["deadline_str"] or "N/A"))
             time.sleep(0.1)
             continue
 
-        open_count += 1
+        aktualnych += 1
         kw = obsahuje_klucove_slovo(vyzva["fulltext"])
 
         if kw:
-            print("-> NAJDENE: '{}'".format(kw))
+            print("-> NAJDENE '{}' | deadline: {}".format(kw, vyzva["deadline_str"]))
             vyzva["klucove_slovo"] = kw
             vyzva["zhrnutie"] = vytvor_zhrnutie(vyzva)
             najdene.append(vyzva)
         else:
-            print("-> Open, bez zhody")
+            print("-> Aktualna, bez zhody | deadline: {}".format(vyzva["deadline_str"]))
 
         time.sleep(0.15)
 
     print("\n" + "=" * 60)
-    print("Open/Forthcoming vyziev: {} | Relevantnych: {} | Chyby: {}".format(
-        open_count, len(najdene), chyby))
+    print("Aktualnych vyziev: {} | Relevantnych: {} | Chyby/404: {}".format(
+        aktualnych, len(najdene), chyby))
     print("=" * 60)
 
-    posli_email(najdene, open_count)
+    posli_email(najdene, aktualnych)
     print("Hotovo! {}".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 
 if __name__ == "__main__":
