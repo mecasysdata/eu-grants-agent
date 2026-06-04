@@ -69,8 +69,7 @@ OBLASTI = {
     ],
 }
 
-#Irelevantne oblasti — vynechame ak neobsahuju nase slova
-
+# === IRELEVANTNE SLOVA ===
 IRELEVANTNE_SLOVA = [
     "cultural heritage", "intangible heritage", "medieval",
     "democracy", "election", "voting", "political party",
@@ -81,13 +80,33 @@ IRELEVANTNE_SLOVA = [
     "palaeoclimate", "archaeology",
 ]
 
-
 # === ODSTRANENIE DUPLIKATOV — PRIORITA STROJARSTVO ===
 strojarske = set(OBLASTI["🏭 Strojárstvo / Industry 4.0"])
 for oblast in ["🌱 Agro / Bio / Circular", "🛡️ Obrana / Drony / Oceány"]:
     OBLASTI[oblast] = [kw for kw in OBLASTI[oblast] if kw not in strojarske]
 
+# === API SEARCH ===
+PAGE_SIZE = 50
 
+def sedia_search(page_number=1):
+    url = "https://api.tech.ec.europa.eu/search-api/prod/rest/search"
+    payload = {
+        "text": "",
+        "type": ["opportunity"],
+        "page": page_number,
+        "pageSize": PAGE_SIZE,
+        "sortBy": "RELEVANCE",
+        "order": "DESC",
+        "filters": {
+            "status": ["31094501", "31094502"],  # Open + Forthcoming
+            "programme": ["HORIZON"]
+        }
+    }
+    headers = {"Content-Type": "application/json"}
+    r = requests.post(url, headers=headers, data=json.dumps(payload))
+    return r.json()
+
+# === ANALYZA VYZVY ===
 def skontroluj_vyzvu(res):
     meta = res.get("metadata", {})
     summary = res.get("summary", "") or ""
@@ -121,7 +140,7 @@ def skontroluj_vyzvu(res):
 
     return None, None, je_sme
 
-
+# === SPRACOVANIE ===
 def spracuj_vysledky(results):
     najdene = []
     for res in results:
@@ -176,7 +195,7 @@ def spracuj_vysledky(results):
 
     return najdene
 
-
+# === ZHRNUTIE ===
 def vytvor_zhrnutie(v):
     vety = []
     vety.append(f"Vyzva '{v['nazov'][:100]}' ({v['identifier']}).")
@@ -190,7 +209,6 @@ def vytvor_zhrnutie(v):
         vety.append(f"Uzavierka: {v['deadline_str']}.")
     return " ".join(vety[:4])
 
-
 # === EMAIL FARBY ===
 OBLAST_FARBY = {
     "🏭 Strojárstvo / Industry 4.0": "#003399",
@@ -198,7 +216,7 @@ OBLAST_FARBY = {
     "🛡️ Obrana / Drony / Oceány": "#b71c1c",
 }
 
-
+# === EMAIL ===
 def posli_email(najdene_podla_oblasti, celkovo):
     msg = MIMEMultipart("alternative")
     datum = datetime.now().strftime("%d.%m.%Y")
@@ -230,7 +248,6 @@ padding-bottom:8px;margin-top:30px;">{oblast} ({len(vyzvy)})</h2>"""
                 "https://ec.europa.eu/info/funding-tenders/opportunities/portal/"
                 f"screen/opportunities/topic-details/{v['identifier']}"
             )
-            tags_str = ", ".join(v.get("tags", []))
             zhrnutie = v.get("zhrnutie", "")
 
             sekcie_text += f"\n{i}. {v['nazov']}\n{zhrnutie}\nSME: ÁNO\nLink: {link}\n"
@@ -242,7 +259,7 @@ padding-bottom:8px;margin-top:30px;">{oblast} ({len(vyzvy)})</h2>"""
         smtp.login(EMAIL_ODOSIELATEL, EMAIL_HESLO)
         smtp.sendmail(EMAIL_ODOSIELATEL, EMAIL_PRIJEMCA, msg.as_bytes())
 
-
+# === MAIN ===
 def main():
     print("=" * 60)
     print("EU GRANTS AGENT – SME ONLY MODE")
@@ -276,7 +293,6 @@ def main():
 
     posli_email(najdene, total)
     print("Hotovo!")
-
 
 if __name__ == "__main__":
     main()
