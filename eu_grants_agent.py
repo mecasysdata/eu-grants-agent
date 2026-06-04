@@ -1,13 +1,16 @@
 """
-EU Grants Agent - OPRAVENA VERZIA
-Hlavna oprava: odstraneny filter podla roku v identifikatore,
-filtrovanie prebieha podla deadline datumu (je_aktualna()).
+EU Grants Agent - FINALNA VERZIA v7
+Mecasys koncern — 3 oblasti:
+  1. Strojárska výroba / Industry 4.0
+  2. Agro/Bio divízia
+  3. Obrana + špeciálne aplikácie
 """
 
 import requests
-import time
-import smtplib
 import re
+import smtplib
+import time
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
@@ -17,323 +20,250 @@ EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
 EMAIL_HESLO       = "jeze ycaa dpty cvll"
 EMAIL_PRIJEMCA    = "maria.genzorova@mecasys.sk"
 
-KLUCOVE_SLOVA = [
-    "industry 4.0", "industry 5.0", "advanced manufacturing",
-    "artificial intelligence", "machine learning", "automation",
-    "automatization", "digital transformation", "smart factory",
-    "cyber-physical", "internet of things", "iot", "robotics",
-    "deep tech", "digitalization", "digitisation", "advanced technology",
-    "emerging technology", "ai-driven", "ai-powered", "autonomous systems",
-    "data-driven", "predictive", "smart manufacturing",
+# === SME DETEKCIA ===
+SME_KLUCOVE_SLOVA = [
+    "sme", "small and medium", "small enterprise", "medium enterprise",
+    "smes", "sme instrument", "eic accelerator", "sme support"
 ]
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0"
+# === SAFE GET ===
+def safe_get(meta, key):
+    lst = meta.get(key, [])
+    return (lst[0] if lst else "") or ""
+
+# === 3 OBLASTI S KLUCOVYMI SLOVAMI ===
+OBLASTI = {
+    "🏭 Strojárstvo / Industry 4.0": [
+        "industry 4.0", "industry 5.0", "advanced manufacturing",
+        "smart factory", "smart manufacturing", "factory automation",
+        "industrial automation", "process automation", "digital twin",
+        "cyber-physical", "industrial digitalisation", "industrial digitalization",
+        "industrial ai", "manufacturing process", "production process",
+        "additive manufacturing", "3d printing", "human-robot", "industrial hub",
+        "cobots", "cobot", "made in europe", "factory of the future",
+        "industrial iot", "iiot", "new approaches for human/ai collaboration",
+        "factory processes and automation", "advanced manufacturing for key products",
+        "testing", "assembly", "prototype",
+    ],
+
+    "🌱 Agro / Bio / Circular": [
+        "mycelium", "mycorrhiz", "bioplastic", "polyhydroxyalkanoate",
+        "controlled environment agriculture", "vertical farming",
+        "precision agriculture", "smart farming", "agri-tech", "agritech",
+        "bio-based", "biobased", "circular bio", "bioeconomy", "bio-economy",
+        "plant growth", "horticulture", "soil health", "microbiome",
+        "biodegradable", "biomaterial", "fermentation", "biotechnology for",
+        "sustainable packaging", "circular packaging", "bio-based textile",
+        "bioremediation", "algae", "aquaponics", "hydroponics",
+    ],
+
+    "🛡️ Obrana / Drony / Oceány": [
+        "unmanned", "uav", "drone", "autonomous vehicle", "autonomous vessel",
+        "autonomous systems", "counter-unmanned", "counter-drone",
+        "dual use", "dual-use", "defence", "defense", "military",
+        "ocean cleaning", "marine litter", "plastic pollution ocean",
+        "water purification", "water treatment", "decontamination",
+        "border surveillance", "critical infrastructure protection",
+        "cbrn", "security technology", "naval", "underwater",
+        "swarm", "autonomous underwater", "auv",
+    ],
 }
-# ==============
 
-def obsahuje_klucove_slovo(text):
-    t = text.lower()
-    for slovo in KLUCOVE_SLOVA:
-        if slovo in t:
-            return slovo
-    return None
+# === ODSTRANENIE DUPLIKATOV — PRIORITA STROJARSTVO ===
+strojarske = set(OBLASTI["🏭 Strojárstvo / Industry 4.0"])
+for oblast in ["🌱 Agro / Bio / Circular", "🛡️ Obrana / Drony / Oceány"]:
+    OBLASTI[oblast] = [kw for kw in OBLASTI[oblast] if kw not in strojarske]
 
-def ziskaj_identifikatory():
-    """
-    Stiahne vsetky identifikatory z topic-list.html.
-    OPRAVA: ziadny filter podla roku v nazve identifikatora —
-    ten filter predhadzal takmer vsetky vyzvy (zostali len 4 z 7618).
-    Filtrovanie podla aktualnosti prebehne neskor cez je_aktualna().
-    """
-    print("Stahujem topic-list.html...")
-    url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topic-list.html"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=30)
-        resp.raise_for_status()
-        vsetky = re.findall(r'topic-details/([a-zA-Z0-9_\-\.]+)', resp.text)
-        vsetky = list(dict.fromkeys(vsetky))  # deduplikacia, zachova poradie
-        print("Celkom identifikatorov: {}".format(len(vsetky)))
-        return vsetky
-    except Exception as e:
-        print("CHYBA topic-list: {}".format(e))
-        return []
 
-def ziskaj_detail(identifier):
-    """
-    Stiahne JSON detail pre dany identifikator.
-    Identifikator musi byt lowercase — API to vyzaduje.
-    """
-    url = "https://ec.europa.eu/info/funding-tenders/opportunities/data/topicDetails/{}.json".format(
-        identifier.lower()
-    )
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception:
-        pass
-    return None
+def skontroluj_vyzvu(res):
+    meta = res.get("metadata", {})
+    summary = res.get("summary", "") or ""
 
-def parsuj_vyzvu(detail, identifier):
-    td = detail.get("TopicDetails", detail)
-    nazov = td.get("title", "")
+    desc_raw = safe_get(meta, "descriptionByte")
+    desc_clean = re.sub(r"<[^>]+>", " ", desc_raw)
+    desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
 
-    fp = td.get("frameworkProgramme", {})
-    programme = fp.get("description", "") if isinstance(fp, dict) else str(fp)
+    tags = meta.get("tags", [])
+    tags_text = " ".join(tags)
+    dest_desc = safe_get(meta, "destinationDescription")
+    call_title = safe_get(meta, "callTitle")
 
-    # Status a deadline z actions[]
-    status = ""
-    deadline_str = ""
-    deadline_ts = 0
-    actions = td.get("actions", [])
-    if actions:
-        a = actions[0]
-        s = a.get("status", {})
-        if isinstance(s, dict):
-            status = s.get("abbreviation", "")
+    fulltext = f"{summary} {tags_text} {desc_clean} {dest_desc} {call_title}".lower()
 
-        # OPRAVA: robustnejsie parsovanie deadline — dates[0] moze byt
-        # integer alebo string, a moze byt None / "null"
-        dates = a.get("deadlineDates", [])
-        if dates and dates[0] is not None:
+    # SME detekcia
+    je_sme = any(kw in fulltext for kw in SME_KLUCOVE_SLOVA)
+
+    # Irelevantné
+    for slovo in IRELEVANTNE_SLOVA:
+        if slovo in fulltext and not any(
+            kw in fulltext for kws in OBLASTI.values() for kw in kws
+        ):
+            return None, None, je_sme
+
+    # Oblasti
+    for oblast, klucove_slova in OBLASTI.items():
+        for kw in klucove_slova:
+            if kw in fulltext:
+                return oblast, kw, je_sme
+
+    return None, None, je_sme
+
+
+def spracuj_vysledky(results):
+    najdene = []
+    for res in results:
+        meta = res.get("metadata", {})
+
+        identifier = safe_get(meta, "identifier").strip()
+        if not identifier:
+            url = res.get("url", "")
+            m = re.search(r'topic-details/([^/?]+)', url, re.IGNORECASE)
+            identifier = m.group(1) if m else ""
+        if not identifier:
+            continue
+
+        oblast, dovod, je_sme = skontroluj_vyzvu(res)
+        if not oblast:
+            continue
+
+        # Deadline
+        dl_raw = safe_get(meta, "deadlineDate")
+        deadline_str = "N/A"
+        if dl_raw:
             try:
-                deadline_ts = int(str(dates[0])) / 1000
-                deadline_str = datetime.utcfromtimestamp(deadline_ts).strftime("%d.%m.%Y")
-            except (ValueError, TypeError, OSError):
-                deadline_str = str(dates[0])[:10]
-                deadline_ts = 0
+                if "T" in str(dl_raw):
+                    dt = datetime.fromisoformat(str(dl_raw).replace("Z", "+00:00"))
+                else:
+                    dt = datetime.fromtimestamp(int(dl_raw) / 1000, tz=timezone.utc)
+                deadline_str = dt.strftime("%d.%m.%Y")
+            except:
+                deadline_str = str(dl_raw)[:10]
 
-    # Popis — ocistit od HTML tagov
-    popis_raw = td.get("description", "")
-    popis = re.sub(r"<[^>]+>", " ", popis_raw)
-    popis = re.sub(r"\s+", " ", popis).strip()
+        status_raw = safe_get(meta, "status").strip()
+        status_label = "Open" if status_raw == "31094501" else "Forthcoming"
 
-    keywords = " ".join(td.get("keywords", []))
-    tags = " ".join(td.get("tags", []))
+        desc_raw = safe_get(meta, "descriptionByte")
+        popis = re.sub(r"<[^>]+>", " ", desc_raw)
+        popis = re.sub(r"\s+", " ", popis).strip()[:600]
 
-    return {
-        "identifier": identifier,
-        "nazov": nazov,
-        "programme": programme,
-        "status": status,
-        "deadline_str": deadline_str,
-        "deadline_ts": deadline_ts,
-        "popis": popis,
-        "fulltext": nazov + " " + popis + " " + keywords + " " + tags,
-    }
+        najdene.append({
+            "identifier": identifier,
+            "nazov": res.get("summary", identifier),
+            "status": status_label,
+            "deadline_str": deadline_str,
+            "oblast": oblast,
+            "dovod": dovod,
+            "je_sme": je_sme,
+            "call_title": safe_get(meta, "callTitle"),
+            "dest_desc": safe_get(meta, "destinationDescription"),
+            "programme": safe_get(meta, "frameworkProgramme") or "Horizon Europe",
+            "tags": meta.get("tags", [])[:5],
+            "popis": popis,
+        })
 
-def je_aktualna(vyzva):
-    """
-    Vrati True ak vyzva je otvorena alebo pripravovana.
-    Toto je jediny spravny sposob filtrovania — podla deadline datumu,
-    nie podla roku v identifikatore.
-    """
-    now_ts = datetime.now(timezone.utc).timestamp()
+    return najdene
 
-    if vyzva["status"] == "Forthcoming":
-        return True
-
-    if vyzva["status"] == "Open" and vyzva["deadline_ts"] > now_ts:
-        return True
-
-    # Fallback: deadline v buducnosti bez ohladu na status string
-    if vyzva["deadline_ts"] > now_ts:
-        return True
-
-    return False
 
 def vytvor_zhrnutie(v):
     vety = []
-    vety.append("Vyzva '{}' ({}) je sucastou programu {}.".format(
-        v["nazov"][:100], v["identifier"], v["programme"] or "Horizon Europe"))
+    vety.append(f"Vyzva '{v['nazov'][:100]}' ({v['identifier']}).")
+    if v.get("call_title"):
+        vety.append(f"Call: {v['call_title']}.")
+    if v.get("dest_desc"):
+        vety.append(f"Ciel: {v['dest_desc'][:200]}.")
+    if v.get("popis"):
+        vety.append(v["popis"][:400] + "...")
+    if v["deadline_str"] != "N/A":
+        vety.append(f"Uzavierka: {v['deadline_str']}.")
+    return " ".join(vety[:4])
 
-    if v["popis"]:
-        popis_vety = re.split(r'(?<=[.!?])\s+', v["popis"])
-        relevantne = [s for s in popis_vety if len(s) > 40][:3]
-        for s in relevantne:
-            vety.append(s[:300] + ("..." if len(s) > 300 else ""))
 
-    if v["deadline_str"]:
-        vety.append("Uzavierka podavania ziadosti: {}.".format(v["deadline_str"]))
+# === EMAIL FARBY ===
+OBLAST_FARBY = {
+    "🏭 Strojárstvo / Industry 4.0": "#003399",
+    "🌱 Agro / Bio / Circular": "#2e7d32",
+    "🛡️ Obrana / Drony / Oceány": "#b71c1c",
+}
 
-    if len(vety) < 3:
-        vety.append("Vyzva sa zameriava na inovativne technologie v oblasti AI a digitalnej transformacie.")
 
-    return " ".join(vety[:6])
-
-def posli_email(najdene, celkovo_aktualnych, celkovo_spracovanych):
+def posli_email(najdene_podla_oblasti, celkovo):
     msg = MIMEMultipart("alternative")
     datum = datetime.now().strftime("%d.%m.%Y")
+    total = sum(len(v) for v in najdene_podla_oblasti.values())
 
-    if najdene:
-        msg["Subject"] = "EU Granty {} - {} relevantnych vyziev!".format(datum, len(najdene))
+    if total:
+        msg["Subject"] = f"EU Granty {datum} — {total} SME vyziev!"
     else:
-        msg["Subject"] = "EU Granty {} - Ziadne relevantne vyzvy".format(datum)
+        msg["Subject"] = f"EU Granty {datum} — Ziadne SME vyzvy"
+
     msg["From"] = EMAIL_ODOSIELATEL
-    msg["To"]   = EMAIL_PRIJEMCA
+    msg["To"] = EMAIL_PRIJEMCA
 
-    if not najdene:
-        text = (
-            "Prepac Majka, nic som nenasel.\n\n"
-            "Spracoval som {} identifikatorov, z toho {} aktualnych vyziev "
-            "(deadline v buducnosti alebo Forthcoming) "
-            "a ziadna neobsahovala relevantne klucove slova "
-            "(Industry 4.0/5.0, AI, automatizacia...)."
-        ).format(celkovo_spracovanych, celkovo_aktualnych)
+    sekcie_html = ""
+    sekcie_text = ""
 
-        html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
-<h2 style="color:#003399;">EU Granty - Tyzdenny prehlad</h2>
-<p>Prepac Majka, nic som nenasel.</p>
-<p style="color:#555;">
-  Spracoval som <strong>{sprac}</strong> identifikatorov,
-  z toho <strong>{akt}</strong> aktualnych vyziev (deadline v buducnosti).<br>
-  Ziadna neobsahovala relevantne klucove slova tykajuce sa Industry 4.0/5.0,
-  AI alebo automatizacie.
-</p>
-</body></html>""".format(sprac=celkovo_spracovanych, akt=celkovo_aktualnych)
+    for oblast, vyzvy in najdene_podla_oblasti.items():
+        if not vyzvy:
+            continue
 
-    else:
-        pocet = len(najdene)
-        bloky_text = ""
-        bloky_html = ""
+        farba = OBLAST_FARBY.get(oblast, "#333")
+        sekcie_text += f"\n\n{'='*60}\n{oblast} ({len(vyzvy)} SME vyziev)\n{'='*60}\n"
+        sekcie_html += f"""
+<h2 style="color:{farba};border-bottom:3px solid {farba};
+padding-bottom:8px;margin-top:30px;">{oblast} ({len(vyzvy)})</h2>"""
 
-        for i, v in enumerate(najdene, 1):
+        for i, v in enumerate(vyzvy, 1):
             link = (
                 "https://ec.europa.eu/info/funding-tenders/opportunities/portal/"
-                "screen/opportunities/topic-details/{}".format(v["identifier"])
+                f"screen/opportunities/topic-details/{v['identifier']}"
             )
-            bloky_text += "\n{sep}\n{i}. {nazov}\n\n{zhrnutie}\n\nLink: {link}\n".format(
-                sep="=" * 60, i=i, nazov=v["nazov"],
-                zhrnutie=v["zhrnutie"], link=link
-            )
-            bloky_html += """
-<div style="border:1px solid #ddd;border-radius:8px;padding:20px;
-            margin-bottom:20px;background:#fafafa;">
-  <h3 style="color:#003399;margin-top:0;">{i}. {nazov}</h3>
-  <p style="color:#333;line-height:1.7;">{zhrnutie}</p>
-  <a href="{link}"
-     style="background:#003399;color:white;padding:10px 20px;
-            text-decoration:none;border-radius:5px;
-            display:inline-block;margin-top:8px;font-weight:bold;">
-     Otvorit vyzvu &rarr;
-  </a>
-  <p style="color:#999;font-size:12px;margin-top:12px;">
-    Klucove slovo: <strong>{kw}</strong> &nbsp;|&nbsp;
-    Status: {status} &nbsp;|&nbsp; Deadline: {deadline}
-  </p>
-</div>""".format(
-                i=i, nazov=v["nazov"], zhrnutie=v["zhrnutie"],
-                link=link, kw=v["klucove_slovo"],
-                status=v["status"], deadline=v.get("deadline_str", "N/A")
-            )
+            tags_str = ", ".join(v.get("tags", []))
+            zhrnutie = v.get("zhrnutie", "")
 
-        text = (
-            "Ahoj Majka!\n\n"
-            "Nasel som {} relevantnych vyziev z {} aktualnych "
-            "(spracovanych celkovo {}):\n{}\nAgent EU Grantov"
-        ).format(pocet, celkovo_aktualnych, celkovo_spracovanych, bloky_text)
+            sekcie_text += f"\n{i}. {v['nazov']}\n{zhrnutie}\nSME: ÁNO\nLink: {link}\n"
 
-        html = """<html><body style="font-family:Arial,sans-serif;padding:20px;max-width:700px;">
-<h2 style="color:#003399;">EU Granty - Nove relevantne vyzvy</h2>
-<p>Ahoj Majka! Nasel som <strong>{pocet}</strong> relevantnych vyziev
-   z {celkovo} aktualnych (spracovanych {sprac}):</p>
-{bloky}
-<p style="color:#aaa;font-size:11px;border-top:1px solid #eee;
-          padding-top:10px;margin-top:20px;">
-  Automaticky vygenerovane agentom EU Grantov - {datum}
-</p>
-</body></html>""".format(
-            pocet=pocet, celkovo=celkovo_aktualnych,
-            sprac=celkovo_spracovanych,
-            bloky=bloky_html,
-            datum=datetime.now().strftime("%d.%m.%Y %H:%M")
-        )
+    msg.attach(MIMEText(sekcie_text, "plain", "utf-8"))
+    msg.attach(MIMEText(sekcie_html, "html", "utf-8"))
 
-    msg.attach(MIMEText(text, "plain", "utf-8"))
-    msg.attach(MIMEText(html,  "html",  "utf-8"))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(EMAIL_ODOSIELATEL, EMAIL_HESLO)
+        smtp.sendmail(EMAIL_ODOSIELATEL, EMAIL_PRIJEMCA, msg.as_bytes())
 
-    print("Posielam email na {}...".format(EMAIL_PRIJEMCA))
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-            smtp.login(EMAIL_ODOSIELATEL, EMAIL_HESLO)
-            smtp.sendmail(EMAIL_ODOSIELATEL, EMAIL_PRIJEMCA, msg.as_bytes())
-        print("Email odoslany!")
-    except Exception as e:
-        print("CHYBA email: {}".format(e))
 
 def main():
     print("=" * 60)
-    print("EU GRANTS AGENT - OPRAVENA VERZIA")
-    print("Start: {}".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
+    print("EU GRANTS AGENT – SME ONLY MODE")
+    print(f"Start: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
     print("=" * 60)
 
-    identifikatory = ziskaj_identifikatory()
-    if not identifikatory:
-        print("Ziadne identifikatory - koniec.")
-        posli_email([], 0, 0)
-        return
+    data = sedia_search(page_number=1)
+    total = data.get("totalResults", 0)
+    total_stran = (total // PAGE_SIZE) + 1
 
-    najdene = []
-    aktualnych = 0
-    chyby = 0
-    spracovanych = 0
-    start_time = time.time()
-    LIMIT_SEKUND = 45 * 60  # 45 minut
+    najdene = {oblast: [] for oblast in OBLASTI}
+    videne = set()
 
-    print("Spracovavam {} identifikatorov...".format(len(identifikatory)))
-    print("(Filtrovanie prebieha podla deadline datumu, nie podla roku v nazve)\n")
+    def pridaj(vysledky):
+        for v in vysledky:
+            if not v["je_sme"]:
+                continue  # SME filter
 
-    for idx, ident in enumerate(identifikatory, 1):
+            if v["identifier"] not in videne:
+                videne.add(v["identifier"])
+                v["zhrnutie"] = vytvor_zhrnutie(v)
+                najdene[v["oblast"]].append(v)
+                print(f"[{v['oblast']}] SME:ÁNO | {v['nazov'][:60]}")
 
-        if time.time() - start_time > LIMIT_SEKUND:
-            print("\nCasovy limit 45 min - posielam co mame ({}/{})".format(
-                idx, len(identifikatory)))
-            break
+    pridaj(spracuj_vysledky(data.get("results", [])))
 
-        print("[{}/{}] {}".format(idx, len(identifikatory), ident[:50]),
-              end=" ", flush=True)
-
-        detail = ziskaj_detail(ident)
-        if detail is None:
-            chyby += 1
-            print("(404/chyba)")
-            time.sleep(0.1)
-            continue
-
-        spracovanych += 1
-        vyzva = parsuj_vyzvu(detail, ident)
-
-        if not je_aktualna(vyzva):
-            print("-> {} deadline: {}".format(
-                vyzva["status"] or "uzavreta", vyzva["deadline_str"] or "N/A"))
-            time.sleep(0.1)
-            continue
-
-        aktualnych += 1
-        kw = obsahuje_klucove_slovo(vyzva["fulltext"])
-
-        if kw:
-            print("-> *** NAJDENE '{}' | deadline: {} ***".format(
-                kw, vyzva["deadline_str"]))
-            vyzva["klucove_slovo"] = kw
-            vyzva["zhrnutie"] = vytvor_zhrnutie(vyzva)
-            najdene.append(vyzva)
-        else:
-            print("-> Aktualna, bez zhody kw | deadline: {}".format(
-                vyzva["deadline_str"]))
-
+    for stranka in range(2, total_stran + 1):
+        data2 = sedia_search(page_number=stranka)
+        pridaj(spracuj_vysledky(data2.get("results", [])))
         time.sleep(0.15)
 
-    print("\n" + "=" * 60)
-    print("Spracovanych:    {}".format(spracovanych))
-    print("Aktualnych:      {}".format(aktualnych))
-    print("Relevantnych:    {}".format(len(najdene)))
-    print("Chyby/404:       {}".format(chyby))
-    print("=" * 60)
+    posli_email(najdene, total)
+    print("Hotovo!")
 
-    posli_email(najdene, aktualnych, spracovanych)
-    print("Hotovo! {}".format(datetime.now().strftime("%d.%m.%Y %H:%M")))
 
 if __name__ == "__main__":
     main()
