@@ -99,7 +99,7 @@ def sedia_search(page_number=1):
         "order": "DESC",
         "filters": {
             "status": ["31094501", "31094502"],  # Open + Forthcoming
-            "programme": ["HORIZON"]
+            "programme": ["HORIZON", "DIGITAL", "EDF", "EIC"]
         }
     }
     headers = {"Content-Type": "application/json"}
