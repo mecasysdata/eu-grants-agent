@@ -69,6 +69,19 @@ OBLASTI = {
     ],
 }
 
+#Irelevantne oblasti — vynechame ak neobsahuju nase slova
+
+IRELEVANTNE_SLOVA = [
+    "cultural heritage", "intangible heritage", "medieval",
+    "democracy", "election", "voting", "political party",
+    "lgbtiq", "gender equality", "minority rights",
+    "dementia", "cancer survivor", "oncology treatment",
+    "fisheries management", "coral reef", "deep sea biology",
+    "particle physics", "nuclear fusion plasma",
+    "palaeoclimate", "archaeology",
+]
+
+
 # === ODSTRANENIE DUPLIKATOV — PRIORITA STROJARSTVO ===
 strojarske = set(OBLASTI["🏭 Strojárstvo / Industry 4.0"])
 for oblast in ["🌱 Agro / Bio / Circular", "🛡️ Obrana / Drony / Oceány"]:
