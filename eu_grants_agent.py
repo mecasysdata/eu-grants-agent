@@ -23,7 +23,7 @@ EMAIL_PRIJEMCA    = "maria.genzorova@mecasys.sk"
 # === SME DETEKCIA ===
 SME_KLUCOVE_SLOVA = [
     "sme", "small and medium", "small enterprise", "medium enterprise",
-    "smes", "sme instrument", "eic accelerator", "sme support"
+    "smes", "sme instrument", "eic accelerator", "sme support","cascade financing"
 ]
 
 # === SAFE GET ===
