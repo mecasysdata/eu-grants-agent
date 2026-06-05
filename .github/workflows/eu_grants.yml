@@ -1,5 +1,4 @@
 name: EU Grants Agent
-
 on:
   schedule:
     - cron: "30 6 * * 1"
@@ -9,7 +8,6 @@ jobs:
   run-agent:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,3 +22,11 @@ jobs:
 
       - name: Run EU Grants Agent
         run: python eu_grants_agent.py
+
+      - name: Save seen identifiers
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "GitHub Actions"
+          git add seen_identifiers.json
+          git commit -m "update seen identifiers [skip ci]" || echo "nothing to commit"
+          git push
