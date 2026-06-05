@@ -1,5 +1,5 @@
 """
-EU Grants Agent - FINALNA VERZIA v7
+EU Grants Agent - FINALNA VERZIA v8
 Mecasys koncern — 3 oblasti:
   1. Strojárska výroba / Industry 4.0
   2. Agro/Bio divízia
@@ -11,6 +11,7 @@ import re
 import smtplib
 import time
 import json
+import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
@@ -20,10 +21,23 @@ EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
 EMAIL_HESLO       = "jeze ycaa dpty cvll"
 EMAIL_PRIJEMCA    = "maria.genzorova@mecasys.sk"
 
+# === DEDUPLICATION ===
+SEEN_FILE = "seen_identifiers.json"
+
+def nacitaj_videne():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    with open(SEEN_FILE, "r") as f:
+        return set(json.load(f))
+
+def uloz_videne(videne):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(list(videne), f)
+
 # === SME DETEKCIA ===
 SME_KLUCOVE_SLOVA = [
     "sme", "small and medium", "small enterprise", "medium enterprise",
-    "smes", "sme instrument", "eic accelerator", "sme support","cascade financing"
+    "smes", "sme instrument", "eic accelerator", "sme support", "cascade financing"
 ]
 
 # === SAFE GET ===
@@ -168,7 +182,7 @@ def spracuj_vysledky(results):
                 else:
                     dt = datetime.fromtimestamp(int(dl_raw) / 1000, tz=timezone.utc)
                 deadline_str = dt.strftime("%d.%m.%Y")
-            except:
+            except (ValueError, TypeError, OSError):
                 deadline_str = str(dl_raw)[:10]
 
         status_raw = safe_get(meta, "status").strip()
@@ -223,9 +237,9 @@ def posli_email(najdene_podla_oblasti, celkovo):
     total = sum(len(v) for v in najdene_podla_oblasti.values())
 
     if total:
-        msg["Subject"] = f"EU Granty {datum} — {total} SME vyziev!"
+        msg["Subject"] = f"EU Granty {datum} — {total} nových SME vyziev!"
     else:
-        msg["Subject"] = f"EU Granty {datum} — Ziadne SME vyzvy"
+        msg["Subject"] = f"EU Granty {datum} — žiadne nové výzvy ✓"
 
     msg["From"] = EMAIL_ODOSIELATEL
     msg["To"] = EMAIL_PRIJEMCA
@@ -266,23 +280,29 @@ def main():
     print(f"Start: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
     print("=" * 60)
 
+    uz_videne = nacitaj_videne()
+    print(f"Už známych výziev: {len(uz_videne)}")
+
     data = sedia_search(page_number=1)
     total = data.get("totalResults", 0)
     total_stran = (total // PAGE_SIZE) + 1
 
     najdene = {oblast: [] for oblast in OBLASTI}
-    videne = set()
+    videne_tento_beh = set()
 
     def pridaj(vysledky):
         for v in vysledky:
             if not v["je_sme"]:
-                continue  # SME filter
+                continue
 
-            if v["identifier"] not in videne:
-                videne.add(v["identifier"])
+            if v["identifier"] in uz_videne:
+                continue  # už bola poslaná
+
+            if v["identifier"] not in videne_tento_beh:
+                videne_tento_beh.add(v["identifier"])
                 v["zhrnutie"] = vytvor_zhrnutie(v)
                 najdene[v["oblast"]].append(v)
-                print(f"[{v['oblast']}] SME:ÁNO | {v['nazov'][:60]}")
+                print(f"[NOVA] [{v['oblast']}] SME:ÁNO | {v['nazov'][:60]}")
 
     pridaj(spracuj_vysledky(data.get("results", [])))
 
@@ -292,6 +312,12 @@ def main():
         time.sleep(0.15)
 
     posli_email(najdene, total)
+
+    # Ulož všetky videné (staré + nové)
+    uloz_videne(uz_videne | videne_tento_beh)
+
+    total_novych = sum(len(v) for v in najdene.values())
+    print(f"Nových výziev odoslaných: {total_novych}")
     print("Hotovo!")
 
 if __name__ == "__main__":
