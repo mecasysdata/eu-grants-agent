@@ -249,7 +249,7 @@ def klasifikuj_vyzvu(hit, detail):
 # ══════════════════════════════════════════════════════════════════
 
 def odosli_email(vysledky, celkovo):
-    datum = datetime.now().strftime("%-d. %-m. %Y")
+    datum = datetime.now().strftime("%d. %m. %Y")
 
     if celkovo == 0:
         predmet   = f"EC Funding Monitor – {datum} – nič nové"
