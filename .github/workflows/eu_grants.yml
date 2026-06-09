@@ -1,13 +1,17 @@
 name: EU Grants Agent
+
 on:
   schedule:
     - cron: "30 6 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run-agent:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
