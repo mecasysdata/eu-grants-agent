@@ -381,7 +381,7 @@ def odosli_email():
     if celkovo == 0:
         html_telo = f"""<html><body style="font-family:Arial,sans-serif;max-width:780px;margin:auto;padding:24px;">
         <h2 style="color:#1a2340;">EC Funding Monitor – {datum}</h2>
-        <p>Tento týždeň neboli nájdené žiadne nové relevantné výzvy.</p>
+        <p>Ahoj Majka, dnes som nič nové nenašiel.</p>
         </body></html>"""
     else:
         bloky = ""
