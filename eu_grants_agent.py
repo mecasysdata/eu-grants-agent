@@ -1,57 +1,32 @@
-"""
-EU Grants Agent - FINALNA VERZIA v8
-Mecasys koncern — 3 oblasti:
-  1. Strojárska výroba / Industry 4.0
-  2. Agro/Bio divízia
-  3. Obrana + špeciálne aplikácie
-"""
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║   MecaSys – EC Funding Monitor  |  COLAB FINAL v1              ║
+# ╚══════════════════════════════════════════════════════════════════╝
+#
+# Tok:
+#  1. Search API (POST multipart) → 646 unikátnych výziev podľa KW
+#  2. Pre každú novú výzvu stiahni detail JSON → plný popis
+#  3. Porovnaj s históriou → len nové (nevidené minulý týždeň)
+#  4. Pošli email Majke s HTML kartami
+#
+# Prvý beh: pošle VŠETKY výzvy + uloží históriu
+# Každý ďalší beh: pošle len nové
 
-import requests
-import re
-import smtplib
-import time
-import json
-import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timezone
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 1 – Konfigurácia
+# ══════════════════════════════════════════════════════════════════
 
-# === KONFIG ===
 EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
 EMAIL_HESLO       = "jeze ycaa dpty cvll"
 EMAIL_PRIJEMCA    = "maria.genzorova@mecasys.sk"
 
-# === DEDUPLICATION ===
-SEEN_FILE = "seen_identifiers.json"
+HISTORIA_SUBOR = "ec_funding_historia.json"
 
-def nacitaj_videne():
-    if not os.path.exists(SEEN_FILE):
-        return set()
-    with open(SEEN_FILE, "r") as f:
-        return set(json.load(f))
-
-def uloz_videne(videne):
-    with open(SEEN_FILE, "w") as f:
-        json.dump(list(videne), f)
-
-# === SME DETEKCIA ===
-SME_KLUCOVE_SLOVA = [
-    "sme", "small and medium", "small enterprise", "medium enterprise",
-    "smes", "sme instrument", "eic accelerator", "sme support", "cascade financing"
-]
-
-# === SAFE GET ===
-def safe_get(meta, key):
-    lst = meta.get(key, [])
-    return (lst[0] if lst else "") or ""
-
-# === 3 OBLASTI S KLUCOVYMI SLOVAMI ===
 OBLASTI = {
     "🏭 Strojárstvo / Industry 4.0": [
         "industry 4.0", "industry 5.0", "advanced manufacturing",
         "smart factory", "smart manufacturing", "factory automation",
         "industrial automation", "process automation", "digital twin",
-        "cyber-physical", "industrial digitalisation", "industrial digitalization",
+        "industry hub", "industrial digitalisation", "industrial digitalization",
         "industrial ai", "manufacturing process", "production process",
         "additive manufacturing", "3d printing", "human-robot", "industrial hub",
         "cobots", "cobot", "made in europe", "factory of the future",
@@ -59,18 +34,15 @@ OBLASTI = {
         "factory processes and automation", "advanced manufacturing for key products",
         "testing", "assembly", "prototype",
     ],
-
     "🌱 Agro / Bio / Circular": [
-        "mycelium", "mycorrhiz", "bioplastic", "polyhydroxyalkanoate",
-        "controlled environment agriculture", "vertical farming",
-        "precision agriculture", "smart farming", "agri-tech", "agritech",
+        "bioplastic", "polyhydroxyalkanoate",
+        "controlled environment agriculture", "precision agriculture",
+        "smart farming", "agri-tech", "agritech",
         "bio-based", "biobased", "circular bio", "bioeconomy", "bio-economy",
         "plant growth", "horticulture", "soil health", "microbiome",
-        "biodegradable", "biomaterial", "fermentation", "biotechnology for",
+        "biodegradable", "biomaterial", "biotechnology for",
         "sustainable packaging", "circular packaging", "bio-based textile",
-        "bioremediation", "algae", "aquaponics", "hydroponics",
     ],
-
     "🛡️ Obrana / Drony / Oceány": [
         "unmanned", "uav", "drone", "autonomous vehicle", "autonomous vessel",
         "autonomous systems", "counter-unmanned", "counter-drone",
@@ -83,242 +55,396 @@ OBLASTI = {
     ],
 }
 
-# === IRELEVANTNE SLOVA ===
-IRELEVANTNE_SLOVA = [
-    "cultural heritage", "intangible heritage", "medieval",
-    "democracy", "election", "voting", "political party",
-    "lgbtiq", "gender equality", "minority rights",
-    "dementia", "cancer survivor", "oncology treatment",
-    "fisheries management", "coral reef", "deep sea biology",
-    "particle physics", "nuclear fusion plasma",
-    "palaeoclimate", "archaeology",
+SME_KLUCOVE_SLOVA = [
+    "sme", "small and medium", "small enterprise", "medium enterprise",
+    "smes", "sme instrument", "eic accelerator", "sme support", "cascade financing",
 ]
 
-# === ODSTRANENIE DUPLIKATOV — PRIORITA STROJARSTVO ===
-strojarske = set(OBLASTI["🏭 Strojárstvo / Industry 4.0"])
-for oblast in ["🌱 Agro / Bio / Circular", "🛡️ Obrana / Drony / Oceány"]:
-    OBLASTI[oblast] = [kw for kw in OBLASTI[oblast] if kw not in strojarske]
+OBLAST_PORADIE = [
+    "🏭 Strojárstvo / Industry 4.0",
+    "🌱 Agro / Bio / Circular",
+    "🛡️ Obrana / Drony / Oceány",
+]
 
-# === API SEARCH ===
-PAGE_SIZE = 50
-
-def sedia_search(page_number=1):
-    url = "https://api.tech.ec.europa.eu/search-api/prod/rest/search"
-    payload = {
-        "text": "",
-        "type": ["opportunity"],
-        "page": page_number,
-        "pageSize": PAGE_SIZE,
-        "sortBy": "RELEVANCE",
-        "order": "DESC",
-        "filters": {
-            "status": ["31094501", "31094502"],  # Open + Forthcoming
-            "programme": ["HORIZON", "DIGITAL", "EDF", "EIC"]
-        }
-    }
-    headers = {"Content-Type": "application/json"}
-    r = requests.post(url, headers=headers, data=json.dumps(payload))
-    return r.json()
-
-# === ANALYZA VYZVY ===
-def skontroluj_vyzvu(res):
-    meta = res.get("metadata", {})
-    summary = res.get("summary", "") or ""
-
-    desc_raw = safe_get(meta, "descriptionByte")
-    desc_clean = re.sub(r"<[^>]+>", " ", desc_raw)
-    desc_clean = re.sub(r"\s+", " ", desc_clean).strip()
-
-    tags = meta.get("tags", [])
-    tags_text = " ".join(tags)
-    dest_desc = safe_get(meta, "destinationDescription")
-    call_title = safe_get(meta, "callTitle")
-
-    fulltext = f"{summary} {tags_text} {desc_clean} {dest_desc} {call_title}".lower()
-
-    # SME detekcia
-    je_sme = any(kw in fulltext for kw in SME_KLUCOVE_SLOVA)
-
-    # Irelevantné
-    for slovo in IRELEVANTNE_SLOVA:
-        if slovo in fulltext and not any(
-            kw in fulltext for kws in OBLASTI.values() for kw in kws
-        ):
-            return None, None, je_sme
-
-    # Oblasti
-    for oblast, klucove_slova in OBLASTI.items():
-        for kw in klucove_slova:
-            if kw in fulltext:
-                return oblast, kw, je_sme
-
-    return None, None, je_sme
-
-# === SPRACOVANIE ===
-def spracuj_vysledky(results):
-    najdene = []
-    for res in results:
-        meta = res.get("metadata", {})
-
-        identifier = safe_get(meta, "identifier").strip()
-        if not identifier:
-            url = res.get("url", "")
-            m = re.search(r'topic-details/([^/?]+)', url, re.IGNORECASE)
-            identifier = m.group(1) if m else ""
-        if not identifier:
-            continue
-
-        oblast, dovod, je_sme = skontroluj_vyzvu(res)
-        if not oblast:
-            continue
-
-        # Deadline
-        dl_raw = safe_get(meta, "deadlineDate")
-        deadline_str = "N/A"
-        if dl_raw:
-            try:
-                if "T" in str(dl_raw):
-                    dt = datetime.fromisoformat(str(dl_raw).replace("Z", "+00:00"))
-                else:
-                    dt = datetime.fromtimestamp(int(dl_raw) / 1000, tz=timezone.utc)
-                deadline_str = dt.strftime("%d.%m.%Y")
-            except (ValueError, TypeError, OSError):
-                deadline_str = str(dl_raw)[:10]
-
-        status_raw = safe_get(meta, "status").strip()
-        status_label = "Open" if status_raw == "31094501" else "Forthcoming"
-
-        desc_raw = safe_get(meta, "descriptionByte")
-        popis = re.sub(r"<[^>]+>", " ", desc_raw)
-        popis = re.sub(r"\s+", " ", popis).strip()[:600]
-
-        najdene.append({
-            "identifier": identifier,
-            "nazov": res.get("summary", identifier),
-            "status": status_label,
-            "deadline_str": deadline_str,
-            "oblast": oblast,
-            "dovod": dovod,
-            "je_sme": je_sme,
-            "call_title": safe_get(meta, "callTitle"),
-            "dest_desc": safe_get(meta, "destinationDescription"),
-            "programme": safe_get(meta, "frameworkProgramme") or "Horizon Europe",
-            "tags": meta.get("tags", [])[:5],
-            "popis": popis,
-        })
-
-    return najdene
-
-# === ZHRNUTIE ===
-def vytvor_zhrnutie(v):
-    vety = []
-    vety.append(f"Vyzva '{v['nazov'][:100]}' ({v['identifier']}).")
-    if v.get("call_title"):
-        vety.append(f"Call: {v['call_title']}.")
-    if v.get("dest_desc"):
-        vety.append(f"Ciel: {v['dest_desc'][:200]}.")
-    if v.get("popis"):
-        vety.append(v["popis"][:400] + "...")
-    if v["deadline_str"] != "N/A":
-        vety.append(f"Uzavierka: {v['deadline_str']}.")
-    return " ".join(vety[:4])
-
-# === EMAIL FARBY ===
-OBLAST_FARBY = {
-    "🏭 Strojárstvo / Industry 4.0": "#003399",
-    "🌱 Agro / Bio / Circular": "#2e7d32",
-    "🛡️ Obrana / Drony / Oceány": "#b71c1c",
+# KW pre search API (všetky oblasti + SME)
+SEARCH_KW = {
+    "🏭 Strojárstvo / Industry 4.0": [
+        "industry 4.0", "industry 5.0", "advanced manufacturing",
+        "smart factory", "smart manufacturing", "factory automation",
+        "industrial automation", "process automation", "digital twin",
+        "industrial digitalisation", "industrial ai", "manufacturing process",
+        "additive manufacturing", "3d printing", "human-robot",
+        "cobots", "cobot", "made in europe", "factory of the future",
+        "industrial iot", "iiot", "prototype",
+    ],
+    "🌱 Agro / Bio / Circular": [
+        "bioplastic", "precision agriculture", "smart farming",
+        "bio-based", "bioeconomy", "plant growth", "horticulture",
+        "soil health", "biodegradable", "biomaterial",
+        "sustainable packaging", "circular packaging",
+    ],
+    "🛡️ Obrana / Drony / Oceány": [
+        "unmanned", "uav", "drone", "autonomous vehicle",
+        "autonomous systems", "counter-drone", "dual-use",
+        "defence", "ocean cleaning", "water purification",
+        "border surveillance", "cbrn", "naval", "underwater", "swarm",
+    ],
+    "SME": [
+        "sme", "small and medium", "eic accelerator", "cascade financing",
+    ],
 }
 
-# === EMAIL ===
-def posli_email(najdene_podla_oblasti, celkovo):
-    msg = MIMEMultipart("alternative")
-    datum = datetime.now().strftime("%d.%m.%Y")
-    total = sum(len(v) for v in najdene_podla_oblasti.values())
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+}
 
-    if total:
-        msg["Subject"] = f"EU Granty {datum} — {total} nových SME vyziev!"
-    else:
-        msg["Subject"] = f"EU Granty {datum} — žiadne nové výzvy ✓"
+print("✅ BUNKA 1 – Konfigurácia načítaná.", flush=True)
 
-    msg["From"] = EMAIL_ODOSIELATEL
-    msg["To"] = EMAIL_PRIJEMCA
 
-    sekcie_html = ""
-    sekcie_text = ""
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 2 – Pomocné funkcie
+# ══════════════════════════════════════════════════════════════════
 
-    for oblast, vyzvy in najdene_podla_oblasti.items():
-        if not vyzvy:
+import requests, json, re, time, os, smtplib
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from IPython.display import display, HTML
+
+def p(msg):
+    print(msg, flush=True)
+
+def _strip_html(text):
+    text = re.sub(r'<[^>]+>', ' ', text or '')
+    return re.sub(r'\s+', ' ', text).strip()
+
+def _skrat(text, vety=5):
+    if not text or len(text) < 40:
+        return text or '—'
+    sents = re.split(r'(?<=[.!?])\s+', text.strip())
+    sents = [s.strip() for s in sents if len(s.strip()) > 20]
+    if not sents:
+        return (text[:500] + '…') if len(text) > 500 else text
+    r = ' '.join(sents[:vety])
+    return (r[:800] + '…') if len(r) > 800 else r
+
+def _obsahuje(text, slova):
+    t = text.lower()
+    return any(w in t for w in slova)
+
+def _najdi(text, slova):
+    t = text.lower()
+    return [w for w in slova if w in t]
+
+def _ts_to_dt(ts_ms):
+    try:
+        return datetime(1970,1,1,tzinfo=timezone.utc) + timedelta(milliseconds=int(ts_ms))
+    except:
+        return None
+
+p("✅ BUNKA 2 – Pomocné funkcie OK.")
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 3 – Krok 1: Search API → všetky unikátne výzvy
+# ══════════════════════════════════════════════════════════════════
+
+def hladaj_kw(slovo, page=1):
+    url = f"https://api.tech.ec.europa.eu/search-api/prod/rest/search?apiKey=SEDIA&text={slovo}&pageSize=50&pageNumber={page}"
+    files = {
+        "sort"         : (None, json.dumps({"order": "DESC", "field": "startDate"}), "application/json"),
+        "query"        : (None, json.dumps({"bool": {"must": [
+                            {"terms": {"type": ["1","2","8"]}},
+                            {"terms": {"status": ["31094501","31094502"]}}
+                         ]}}), "application/json"),
+        "languages"    : (None, json.dumps(["en"]), "application/json"),
+    }
+    r = requests.post(url, files=files, headers=HEADERS, timeout=30)
+    return r.json()
+
+def ziskaj_vsetky_vyzvy():
+    vsetky = {}   # identifier → hit
+    for oblast, slova in SEARCH_KW.items():
+        for slovo in slova:
+            data = hladaj_kw(slovo)
+            total = data.get('totalResults', 0)
+            pages = (total + 49) // 50
+            nove = 0
+            for page in range(1, pages + 1):
+                if page > 1:
+                    data = hladaj_kw(slovo, page)
+                for hit in data.get('results', []):
+                    ident = hit['metadata']['identifier'][0]
+                    if ident not in vsetky:
+                        vsetky[ident] = hit
+                        vsetky[ident]['_oblast'] = oblast
+                        vsetky[ident]['_kw']     = slovo
+                        nove += 1
+                time.sleep(0.3)
+            p(f"  '{slovo}': {total} celkom, {nove} nových (spolu: {len(vsetky)})")
+    return vsetky
+
+p("▶ Sťahujem výzvy cez Search API ...")
+vsetky_raw = ziskaj_vsetky_vyzvy()
+p(f"\n✅ Celkovo unikátnych výziev: {len(vsetky_raw)}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 4 – Krok 2: História → len nové výzvy
+# ══════════════════════════════════════════════════════════════════
+
+def nacitaj_historiu():
+    if os.path.exists(HISTORIA_SUBOR):
+        with open(HISTORIA_SUBOR, 'r') as f:
+            return json.load(f)
+    return {}
+
+def uloz_historiu(historia):
+    with open(HISTORIA_SUBOR, 'w') as f:
+        json.dump(historia, f, indent=2)
+
+historia = nacitaj_historiu()
+aktualne_ids = list(vsetky_raw.keys())
+nove_ids = [i for i in aktualne_ids if i not in historia]
+
+prvy_beh = len(historia) == 0
+p(f"História        : {len(historia)} výziev")
+p(f"Aktuálne výzvy  : {len(aktualne_ids)}")
+p(f"Nové (nevidené) : {len(nove_ids)}")
+
+if prvy_beh:
+    p("ℹ️  Prvý beh – pošleme VŠETKY výzvy.")
+    ids_na_spracovanie = aktualne_ids
+else:
+    p("ℹ️  Ďalší beh – pošleme len nové.")
+    ids_na_spracovanie = nove_ids
+
+p(f"Na spracovanie  : {len(ids_na_spracovanie)} výziev")
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 5 – Krok 3: Detail JSON → plný popis + klasifikácia
+# ══════════════════════════════════════════════════════════════════
+
+def ziskaj_detail(identifier):
+    url = f"https://ec.europa.eu/info/funding-tenders/opportunities/data/topicDetails/{identifier.lower()}.json"
+    r = requests.get(url, headers=HEADERS, timeout=15)
+    if r.status_code == 200:
+        return r.json().get('TopicDetails', {})
+    return {}
+
+def klasifikuj_vyzvu(hit, detail):
+    """Klasifikuje výzvu podľa kľúčových slov v názve + popise."""
+    nazov  = hit.get('summary', '')
+    popis_html = detail.get('description', '')
+    popis  = _strip_html(popis_html)
+    fulltext = f"{nazov} {popis}".lower()
+
+    # Oblast
+    zhodne = [o for o in OBLAST_PORADIE if _obsahuje(fulltext, OBLASTI[o])]
+    if not zhodne:
+        # SME only – zaradíme do Strojárstvo ako fallback
+        if _obsahuje(fulltext, SME_KLUCOVE_SLOVA):
+            zhodne = ["🏭 Strojárstvo / Industry 4.0"]
+        else:
+            return None
+
+    hlavna = "🏭 Strojárstvo / Industry 4.0"
+    oblast = hlavna if hlavna in zhodne else zhodne[0]
+
+    meta = hit['metadata']
+    pub_ts = detail.get('publicationDateLong', 0)
+    pub_dt = _ts_to_dt(pub_ts)
+
+    return {
+        "identifier"  : meta['identifier'][0],
+        "nazov"       : nazov,
+        "oblast"      : oblast,
+        "kw"          : _najdi(fulltext, OBLASTI[oblast])[:6],
+        "kw_sme"      : _najdi(fulltext, SME_KLUCOVE_SLOVA),
+        "sme"         : _obsahuje(fulltext, SME_KLUCOVE_SLOVA),
+        "programme"   : meta.get('frameworkProgramme', [''])[0],
+        "status"      : meta.get('status', [''])[0],
+        "startDate"   : meta.get('startDate', [''])[0][:10],
+        "deadline"    : meta.get('deadlineDate', [''])[0][:10],
+        "pub_datum"   : pub_dt.strftime('%d.%m.%Y') if pub_dt else '—',
+        "zhrnutie"    : _skrat(popis, 5),
+        "link"        : meta.get('url', [''])[0],
+    }
+
+# Spracuj všetky nové výzvy
+vysledky = defaultdict(list)
+chyby = 0
+total = len(ids_na_spracovanie)
+
+p(f"\n▶ Sťahujem detaily pre {total} výziev (~{total*0.3/60:.1f} min) ...")
+
+for i, ident in enumerate(ids_na_spracovanie):
+    detail = ziskaj_detail(ident)
+    if not detail:
+        chyby += 1
+        time.sleep(0.2)
+        continue
+
+    v = klasifikuj_vyzvu(vsetky_raw[ident], detail)
+    if v:
+        vysledky[v['oblast']].append(v)
+
+    if (i+1) % 50 == 0:
+        p(f"  [{i+1:4d}/{total}] relevantných: {sum(len(x) for x in vysledky.values())} | chýb: {chyby}")
+
+    time.sleep(0.3)
+
+celkovo = sum(len(v) for v in vysledky.values())
+p(f"\n✅ Relevantných výziev: {celkovo}")
+for o in OBLAST_PORADIE:
+    if o in vysledky:
+        p(f"   {o}: {len(vysledky[o])}")
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 6 – Textový výpis (kontrola)
+# ══════════════════════════════════════════════════════════════════
+
+SEP = "─" * 80
+for oblast in OBLAST_PORADIE:
+    if oblast not in vysledky:
+        continue
+    p(f"\n{'═'*80}")
+    p(f"  {oblast}  ({len(vysledky[oblast])} výziev)")
+    p('═'*80)
+    for i, v in enumerate(vysledky[oblast], 1):
+        sme = "  [✅ SME]" if v["sme"] else ""
+        p(f"\n{i}. {v['nazov']}{sme}")
+        p(f"   ID        : {v['identifier']}")
+        p(f"   Program   : {v['programme']}  |  Stav: {v['status']}")
+        p(f"   Otvorenie : {v['startDate']}  |  Uzávierka: {v['deadline']}")
+        p(f"   KW        : {', '.join(v['kw'][:5])}")
+        if v["kw_sme"]:
+            p(f"   SME KW    : {', '.join(v['kw_sme'])}")
+        p(f"   Zhrnutie  : {v['zhrnutie'][:300]}")
+        p(f"   🔗 {v['link']}")
+        p(SEP)
+
+
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 7 – HTML náhľad v Colab
+# ══════════════════════════════════════════════════════════════════
+
+def render_html():
+    if celkovo == 0:
+        display(HTML("<p style='color:red;font-weight:bold;'>Žiadne nové výzvy tento týždeň.</p>"))
+        return
+    html = """<style>
+      .card{border:1px solid #dde3ea;border-radius:8px;padding:14px 18px;
+            margin:10px 0;background:#fafbfc;font-family:Arial,sans-serif}
+      .card h3{margin:0 0 5px;color:#1a2340;font-size:14px}
+      .meta{font-size:12px;color:#555;margin:0 0 6px}
+      .zhr{font-size:13px;color:#333;line-height:1.5;margin:0 0 5px}
+      .kw{font-size:11px;color:#777;margin:0 0 4px}
+      .lnk a{font-size:12px;color:#1565c0;word-break:break-all}
+      .sme{background:#e8f5e9;color:#2e7d32;padding:2px 7px;border-radius:10px;font-size:11px;margin-left:6px}
+      .oh{background:#1a2340;color:#fff;padding:10px 16px;border-radius:6px;margin:22px 0 8px;font-size:15px}
+    </style>"""
+    for oblast in OBLAST_PORADIE:
+        if oblast not in vysledky:
             continue
+        html += f'<div class="oh">{oblast} – {len(vysledky[oblast])} výziev</div>'
+        for v in vysledky[oblast]:
+            sme  = '<span class="sme">✅ SME</span>' if v["sme"] else ""
+            skw  = f' &nbsp;<b>SME KW:</b> {", ".join(v["kw_sme"])}' if v["kw_sme"] else ""
+            html += f"""<div class="card">
+              <h3>{v['nazov']}{sme}</h3>
+              <p class="meta"><b>ID:</b> {v['identifier']} &nbsp;|&nbsp;
+                <b>Program:</b> {v['programme']} &nbsp;|&nbsp;
+                <b>Stav:</b> {v['status']} &nbsp;|&nbsp;
+                <b>Otvorenie:</b> {v['startDate']} &nbsp;|&nbsp;
+                <b>Uzávierka:</b> {v['deadline']}</p>
+              <p class="zhr">{v['zhrnutie']}</p>
+              <p class="kw"><b>KW:</b> {', '.join(v['kw'][:6])}{skw}</p>
+              <p class="lnk"><a href="{v['link']}" target="_blank">🔗 {v['link']}</a></p>
+            </div>"""
+    display(HTML(html))
 
-        farba = OBLAST_FARBY.get(oblast, "#333")
-        sekcie_text += f"\n\n{'='*60}\n{oblast} ({len(vyzvy)} SME vyziev)\n{'='*60}\n"
-        sekcie_html += f"""
-<h2 style="color:{farba};border-bottom:3px solid {farba};
-padding-bottom:8px;margin-top:30px;">{oblast} ({len(vyzvy)})</h2>"""
+render_html()
 
-        for i, v in enumerate(vyzvy, 1):
-            link = (
-                "https://ec.europa.eu/info/funding-tenders/opportunities/portal/"
-                f"screen/opportunities/topic-details/{v['identifier']}"
-            )
-            zhrnutie = v.get("zhrnutie", "")
 
-            sekcie_text += f"\n{i}. {v['nazov']}\n{zhrnutie}\nSME: ÁNO\nLink: {link}\n"
+# ══════════════════════════════════════════════════════════════════
+# BUNKA 8 – Email
+# ══════════════════════════════════════════════════════════════════
 
-    msg.attach(MIMEText(sekcie_text, "plain", "utf-8"))
-    msg.attach(MIMEText(sekcie_html, "html", "utf-8"))
+def odosli_email():
+    datum = datetime.now().strftime("%-d. %-m. %Y")
+    predmet = f"EC Funding Monitor – {datum} ({celkovo} nových výziev)"
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(EMAIL_ODOSIELATEL, EMAIL_HESLO)
-        smtp.sendmail(EMAIL_ODOSIELATEL, EMAIL_PRIJEMCA, msg.as_bytes())
-
-# === MAIN ===
-def main():
-    print("=" * 60)
-    print("EU GRANTS AGENT – SME ONLY MODE")
-    print(f"Start: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-    print("=" * 60)
-
-    uz_videne = nacitaj_videne()
-    print(f"Už známych výziev: {len(uz_videne)}")
-
-    data = sedia_search(page_number=1)
-    total = data.get("totalResults", 0)
-    total_stran = (total // PAGE_SIZE) + 1
-
-    najdene = {oblast: [] for oblast in OBLASTI}
-    videne_tento_beh = set()
-
-    def pridaj(vysledky):
-        for v in vysledky:
-            if not v["je_sme"]:
+    if celkovo == 0:
+        html_telo = f"""<html><body style="font-family:Arial,sans-serif;max-width:780px;margin:auto;padding:24px;">
+        <h2 style="color:#1a2340;">EC Funding Monitor – {datum}</h2>
+        <p>Tento týždeň neboli nájdené žiadne nové relevantné výzvy.</p>
+        </body></html>"""
+    else:
+        bloky = ""
+        for oblast in OBLAST_PORADIE:
+            if oblast not in vysledky:
                 continue
+            bloky += f'<h2 style="color:#1a2340;border-bottom:2px solid #c8d0e0;padding-bottom:6px;margin-top:30px;">{oblast}</h2>'
+            for v in vysledky[oblast]:
+                sme_badge = ('<span style="background:#e8f5e9;color:#2e7d32;padding:2px 7px;'
+                            'border-radius:10px;font-size:12px;margin-left:6px;">✅ SME</span>'
+                            if v["sme"] else "")
+                kw_text = ", ".join(v["kw"]) if v["kw"] else "—"
+                sme_kw  = f'<br><b>SME KW:</b> {", ".join(v["kw_sme"])}' if v["kw_sme"] else ""
+                bloky += f"""
+                <div style="border:1px solid #dde3ea;border-radius:8px;padding:16px 20px;margin-bottom:18px;background:#fafbfc;">
+                  <h3 style="margin:0 0 6px;color:#1a2340;font-size:15px;">{v['nazov']}{sme_badge}</h3>
+                  <p style="margin:0 0 8px;font-size:13px;color:#555;">
+                    <b>Program:</b> {v['programme']} &nbsp;|&nbsp;
+                    <b>Stav:</b> {v['status']} &nbsp;|&nbsp;
+                    <b>Otvorenie:</b> {v['startDate']} &nbsp;|&nbsp;
+                    <b>Uzávierka:</b> {v['deadline']}
+                  </p>
+                  <p style="margin:0 0 8px;font-size:13px;color:#333;line-height:1.6;">{v['zhrnutie']}</p>
+                  <p style="margin:0 0 6px;font-size:12px;color:#777;"><b>KW:</b> {kw_text}{sme_kw}</p>
+                  <a href="{v['link']}" style="color:#1565c0;font-size:13px;">🔗 {v['link']}</a>
+                </div>"""
 
-            if v["identifier"] in uz_videne:
-                continue  # už bola poslaná
+        html_telo = f"""<html><body style="font-family:Arial,sans-serif;max-width:780px;margin:auto;padding:24px;">
+        <div style="background:#1a2340;color:#fff;padding:20px 24px;border-radius:8px 8px 0 0;">
+          <h1 style="margin:0;font-size:20px;">📢 EC Funding Monitor – {datum}</h1>
+          <p style="margin:6px 0 0;font-size:14px;opacity:.85;">
+            Nových relevantných výziev: <strong>{celkovo}</strong>
+          </p>
+        </div>
+        <div style="border:1px solid #dde3ea;border-top:none;padding:20px 24px;border-radius:0 0 8px 8px;">
+          {bloky}
+          <hr style="border:none;border-top:1px solid #e0e6ef;margin:30px 0 16px;">
+          <p style="font-size:12px;color:#888;">
+            Automaticky vygenerované – MecaSys EC Funding Monitor<br>
+            Zdroj: <a href="https://ec.europa.eu/info/funding-tenders/opportunities/portal/screen/opportunities/calls-for-proposals" style="color:#1565c0;">EC Funding &amp; Tenders Portal</a>
+          </p>
+        </div>
+        </body></html>"""
 
-            if v["identifier"] not in videne_tento_beh:
-                videne_tento_beh.add(v["identifier"])
-                v["zhrnutie"] = vytvor_zhrnutie(v)
-                najdene[v["oblast"]].append(v)
-                print(f"[NOVA] [{v['oblast']}] SME:ÁNO | {v['nazov'][:60]}")
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = predmet
+    msg["From"]    = EMAIL_ODOSIELATEL
+    msg["To"]      = EMAIL_PRIJEMCA
+    msg.attach(MIMEText(html_telo, "html", "utf-8"))
 
-    pridaj(spracuj_vysledky(data.get("results", [])))
+    p(f"Odosielam email na {EMAIL_PRIJEMCA} ...")
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_ODOSIELATEL, EMAIL_HESLO)
+            server.sendmail(EMAIL_ODOSIELATEL, EMAIL_PRIJEMCA, msg.as_string())
+        p("✅ Email odoslaný!")
+    except Exception as e:
+        p(f"❌ Chyba emailu: {e}")
 
-    for stranka in range(2, total_stran + 1):
-        data2 = sedia_search(page_number=stranka)
-        pridaj(spracuj_vysledky(data2.get("results", [])))
-        time.sleep(0.15)
+# ── Odošli email ──────────────────────────────────────────────────
+odosli_email()
 
-    posli_email(najdene, total)
-
-    # Ulož všetky videné (staré + nové)
-    uloz_videne(uz_videne | videne_tento_beh)
-
-    total_novych = sum(len(v) for v in najdene.values())
-    print(f"Nových výziev odoslaných: {total_novych}")
-    print("Hotovo!")
-
-if __name__ == "__main__":
-    main()
+# ── Ulož históriu (až po úspešnom odoslaní) ───────────────────────
+nova_historia = {**historia, **{i: datetime.now().strftime("%Y-%m-%d") for i in ids_na_spracovanie}}
+uloz_historiu(nova_historia)
+p(f"✅ História aktualizovaná: {len(nova_historia)} výziev celkovo")
