@@ -1,5 +1,5 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║   MecaSys – EC Funding Monitor  |  FINAL                       ║
+# ║   MecaSys – EC Funding Monitor  |  FINAL v3                    ║
 # ║   Funguje v: Google Colab aj GitHub Actions                     ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
@@ -11,7 +11,7 @@ EMAIL_ODOSIELATEL = "mecasysdata@gmail.com"
 EMAIL_HESLO       = "jeze ycaa dpty cvll"  # Gmail App Password
 EMAIL_PRIJEMCA    = "maria.genzorova@mecasys.sk"
 
-HISTORIA_SUBOR = "seen_identifiers.json"  # ukladá GitHub Actions aj Colab
+HISTORIA_SUBOR = "seen_identifiers.json"
 
 OBLASTI = {
     "🏭 Strojárstvo / Industry 4.0": [
@@ -99,7 +99,6 @@ from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Colab HTML náhľad – funguje len v Colab, v GitHub Actions sa preskočí
 try:
     from IPython.display import display, HTML
     V_COLAB = True
@@ -187,7 +186,12 @@ def ziskaj_vsetky_vyzvy():
 def nacitaj_historiu():
     if os.path.exists(HISTORIA_SUBOR):
         with open(HISTORIA_SUBOR, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Ochrana: ak je to list (starý formát), konvertuj na dict
+            if isinstance(data, list):
+                p(f"  ℹ️  História v starom formáte (list) – konvertujem na dict")
+                return {i: "unknown" for i in data}
+            return data
     return {}
 
 def uloz_historiu(historia):
@@ -265,22 +269,23 @@ def odosli_email(vysledky, celkovo):
           </div>
         </body></html>"""
     else:
-        predmet = f"EC Funding Monitor – {datum} – {celkovo} nových výziev"
+        predmet = f"EC Funding Monitor – {datum} – {celkovo} nových SME výziev"
         bloky   = ""
         for oblast in OBLAST_PORADIE:
             if oblast not in vysledky:
                 continue
             bloky += f'<h2 style="color:#1a2340;border-bottom:2px solid #c8d0e0;padding-bottom:6px;margin-top:30px;">{oblast}</h2>'
             for v in vysledky[oblast]:
-                sme_badge = ('<span style="background:#e8f5e9;color:#2e7d32;padding:2px 7px;'
-                             'border-radius:10px;font-size:12px;margin-left:6px;">✅ SME</span>'
-                             if v["sme"] else "")
                 kw_text = ", ".join(v["kw"]) if v["kw"] else "—"
                 sme_kw  = f'<br><b>SME KW:</b> {", ".join(v["kw_sme"])}' if v["kw_sme"] else ""
                 bloky += f"""
                 <div style="border:1px solid #dde3ea;border-radius:8px;padding:16px 20px;
                             margin-bottom:18px;background:#fafbfc;">
-                  <h3 style="margin:0 0 6px;color:#1a2340;font-size:15px;">{v['nazov']}{sme_badge}</h3>
+                  <h3 style="margin:0 0 6px;color:#1a2340;font-size:15px;">
+                    {v['nazov']}
+                    <span style="background:#e8f5e9;color:#2e7d32;padding:2px 7px;
+                                 border-radius:10px;font-size:12px;margin-left:6px;">✅ SME</span>
+                  </h3>
                   <p style="margin:0 0 8px;font-size:13px;color:#555;">
                     <b>Program:</b> {v['programme']} &nbsp;|&nbsp;
                     <b>Stav:</b> {v['status']} &nbsp;|&nbsp;
@@ -297,7 +302,7 @@ def odosli_email(vysledky, celkovo):
           <div style="background:#1a2340;color:#fff;padding:20px 24px;border-radius:8px 8px 0 0;">
             <h1 style="margin:0;font-size:20px;">📢 EC Funding Monitor – {datum}</h1>
             <p style="margin:6px 0 0;font-size:14px;opacity:.85;">
-              Nových relevantných výziev: <strong>{celkovo}</strong>
+              Nových SME relevantných výziev: <strong>{celkovo}</strong>
             </p>
           </div>
           <div style="border:1px solid #dde3ea;border-top:none;padding:20px 24px;border-radius:0 0 8px 8px;">
@@ -342,10 +347,10 @@ def main():
 
     # 2. Porovnaj s históriou
     p("\n▶ KROK 2 – Porovnávam s históriou ...")
-    historia       = nacitaj_historiu()
-    aktualne_ids   = list(vsetky_raw.keys())
-    nove_ids       = [i for i in aktualne_ids if i not in historia]
-    prvy_beh       = len(historia) == 0
+    historia     = nacitaj_historiu()
+    aktualne_ids = list(vsetky_raw.keys())
+    nove_ids     = [i for i in aktualne_ids if i not in historia]
+    prvy_beh     = len(historia) == 0
 
     p(f"História        : {len(historia)} výziev")
     p(f"Aktuálne výzvy  : {len(aktualne_ids)}")
@@ -370,35 +375,43 @@ def main():
         if v:
             vysledky[v['oblast']].append(v)
         if (i+1) % 50 == 0:
-            p(f"  [{i+1:4d}/{total}] relevantných: {sum(len(x) for x in vysledky.values())} | chýb: {chyby}")
+            p(f"  [{i+1:4d}/{total}] klasifikovaných: {sum(len(x) for x in vysledky.values())} | chýb: {chyby}")
         time.sleep(0.3)
 
+    # ── SME filter – ponechaj len výzvy s SME relevanciou ─────────
+    p("\n▶ Aplikujem SME filter ...")
+    for oblast in list(vysledky.keys()):
+        vysledky[oblast] = [v for v in vysledky[oblast] if v["sme"]]
+        if not vysledky[oblast]:
+            del vysledky[oblast]
+
     celkovo = sum(len(v) for v in vysledky.values())
-    p(f"\n✅ Relevantných výziev: {celkovo}")
+    p(f"✅ SME relevantných výziev: {celkovo}")
     for o in OBLAST_PORADIE:
         if o in vysledky:
             p(f"   {o}: {len(vysledky[o])}")
 
     # Textový výpis
     SEP = "─" * 80
-    for oblast in OBLAST_PORADIE:
-        if oblast not in vysledky:
-            continue
-        p(f"\n{'═'*80}")
-        p(f"  {oblast}  ({len(vysledky[oblast])} výziev)")
-        p('═'*80)
-        for i, v in enumerate(vysledky[oblast], 1):
-            sme = "  [✅ SME]" if v["sme"] else ""
-            p(f"\n{i}. {v['nazov']}{sme}")
-            p(f"   ID        : {v['identifier']}")
-            p(f"   Program   : {v['programme']}  |  Stav: {v['status']}")
-            p(f"   Otvorenie : {v['startDate']}  |  Uzávierka: {v['deadline']}")
-            p(f"   KW        : {', '.join(v['kw'][:5])}")
-            if v["kw_sme"]:
+    if celkovo == 0:
+        p("ℹ️  Žiadne SME výzvy tento týždeň.")
+    else:
+        for oblast in OBLAST_PORADIE:
+            if oblast not in vysledky:
+                continue
+            p(f"\n{'═'*80}")
+            p(f"  {oblast}  ({len(vysledky[oblast])} SME výziev)")
+            p('═'*80)
+            for i, v in enumerate(vysledky[oblast], 1):
+                p(f"\n{i}. {v['nazov']}")
+                p(f"   ID        : {v['identifier']}")
+                p(f"   Program   : {v['programme']}  |  Stav: {v['status']}")
+                p(f"   Otvorenie : {v['startDate']}  |  Uzávierka: {v['deadline']}")
+                p(f"   KW        : {', '.join(v['kw'][:5])}")
                 p(f"   SME KW    : {', '.join(v['kw_sme'])}")
-            p(f"   Zhrnutie  : {v['zhrnutie'][:300]}")
-            p(f"   🔗 {v['link']}")
-            p(SEP)
+                p(f"   Zhrnutie  : {v['zhrnutie'][:300]}")
+                p(f"   🔗 {v['link']}")
+                p(SEP)
 
     # HTML náhľad (len v Colab)
     if V_COLAB and celkovo > 0:
@@ -416,12 +429,11 @@ def main():
         for oblast in OBLAST_PORADIE:
             if oblast not in vysledky:
                 continue
-            html += f'<div class="oh">{oblast} – {len(vysledky[oblast])} výziev</div>'
+            html += f'<div class="oh">{oblast} – {len(vysledky[oblast])} SME výziev</div>'
             for v in vysledky[oblast]:
-                sme  = '<span class="sme">✅ SME</span>' if v["sme"] else ""
-                skw  = f' &nbsp;<b>SME KW:</b> {", ".join(v["kw_sme"])}' if v["kw_sme"] else ""
+                skw = f' &nbsp;<b>SME KW:</b> {", ".join(v["kw_sme"])}' if v["kw_sme"] else ""
                 html += f"""<div class="card">
-                  <h3>{v['nazov']}{sme}</h3>
+                  <h3>{v['nazov']} <span class="sme">✅ SME</span></h3>
                   <p class="meta"><b>ID:</b> {v['identifier']} &nbsp;|&nbsp;
                     <b>Program:</b> {v['programme']} &nbsp;|&nbsp;
                     <b>Stav:</b> {v['status']} &nbsp;|&nbsp;
