@@ -1,6 +1,7 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║   MecaSys – EC Funding Monitor  |  FINAL v3                    ║
+# ║   MecaSys – EC Funding Monitor  |  FINAL v4                    ║
 # ║   Funguje v: Google Colab aj GitHub Actions                     ║
+# ║   Zmeny v4: opravený SME filter + mapovanie Programme ID        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 # ══════════════════════════════════════════════════════════════════
@@ -85,6 +86,23 @@ SEARCH_KW = {
     ],
 }
 
+# ── FIX 5: Mapovanie Programme ID → čitateľný názov ──────────
+PROGRAMME_MAP = {
+    "43108390": "Horizon Europe",
+    "44181033": "EDF",
+    "43152860": "Digital Europe",
+    "43252405": "LIFE",
+    "43251567": "CEF Energy",
+    "43251589": "CERV",
+    "43252368": "ISF",
+    "43252476": "SMP / COSME",
+    "43252517": "ESF+",
+    "43298916": "Euratom",
+    "43353764": "Erasmus+",
+    "43637601": "PPPA",
+    "44416173": "Interreg / I3",
+}
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
 }
@@ -122,19 +140,41 @@ def _skrat(text, vety=5):
     r = ' '.join(sents[:vety])
     return (r[:800] + '…') if len(r) > 800 else r
 
+# ── FIX 1: Opravený SME filter – hľadá celé slová (nie uprostred iných) ──
 def _obsahuje(text, slova):
     t = text.lower()
-    return any(w in t for w in slova)
+    for w in slova:
+        if len(w.split()) > 1:
+            # viacslovná fráza – bežné hľadanie
+            if w in t:
+                return True
+        else:
+            # jednoslovné – musí byť celé slovo (nie "awesome", "some", "milestone")
+            if re.search(r'\b' + re.escape(w) + r'\b', t):
+                return True
+    return False
 
 def _najdi(text, slova):
     t = text.lower()
-    return [w for w in slova if w in t]
+    found = []
+    for w in slova:
+        if len(w.split()) > 1:
+            if w in t:
+                found.append(w)
+        else:
+            if re.search(r'\b' + re.escape(w) + r'\b', t):
+                found.append(w)
+    return found
 
 def _ts_to_dt(ts_ms):
     try:
         return datetime(1970,1,1,tzinfo=timezone.utc) + timedelta(milliseconds=int(ts_ms))
     except:
         return None
+
+# ── FIX 5: Preklad Programme ID na názov ──────────────────────
+def _nazov_programu(programme_id):
+    return PROGRAMME_MAP.get(str(programme_id), str(programme_id))
 
 # ══════════════════════════════════════════════════════════════════
 # KROK 1 – Search API → všetky unikátne výzvy
@@ -187,7 +227,6 @@ def nacitaj_historiu():
     if os.path.exists(HISTORIA_SUBOR):
         with open(HISTORIA_SUBOR, 'r') as f:
             data = json.load(f)
-            # Ochrana: ak je to list (starý formát), konvertuj na dict
             if isinstance(data, list):
                 p(f"  ℹ️  História v starom formáte (list) – konvertujem na dict")
                 return {i: "unknown" for i in data}
@@ -228,9 +267,10 @@ def klasifikuj_vyzvu(hit, detail):
     hlavna = "🏭 Strojárstvo / Industry 4.0"
     oblast = hlavna if hlavna in zhodne else zhodne[0]
 
-    meta   = hit['metadata']
-    pub_ts = detail.get('publicationDateLong', 0)
-    pub_dt = _ts_to_dt(pub_ts)
+    meta       = hit['metadata']
+    pub_ts     = detail.get('publicationDateLong', 0)
+    pub_dt     = _ts_to_dt(pub_ts)
+    prog_raw   = meta.get('frameworkProgramme', [''])[0]
 
     return {
         "identifier": meta['identifier'][0],
@@ -239,7 +279,7 @@ def klasifikuj_vyzvu(hit, detail):
         "kw"        : _najdi(fulltext, OBLASTI[oblast])[:6],
         "kw_sme"    : _najdi(fulltext, SME_KLUCOVE_SLOVA),
         "sme"       : _obsahuje(fulltext, SME_KLUCOVE_SLOVA),
-        "programme" : meta.get('frameworkProgramme', [''])[0],
+        "programme" : _nazov_programu(prog_raw),   # ← FIX 5: čitateľný názov
         "status"    : meta.get('status', [''])[0],
         "startDate" : meta.get('startDate', [''])[0][:10],
         "deadline"  : meta.get('deadlineDate', [''])[0][:10],
@@ -378,7 +418,7 @@ def main():
             p(f"  [{i+1:4d}/{total}] klasifikovaných: {sum(len(x) for x in vysledky.values())} | chýb: {chyby}")
         time.sleep(0.3)
 
-    # ── SME filter – ponechaj len výzvy s SME relevanciou ─────────
+    # SME filter
     p("\n▶ Aplikujem SME filter ...")
     for oblast in list(vysledky.keys()):
         vysledky[oblast] = [v for v in vysledky[oblast] if v["sme"]]
