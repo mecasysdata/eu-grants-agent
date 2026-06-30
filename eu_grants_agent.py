@@ -2,6 +2,7 @@
 # ║   MecaSys – EC Funding Monitor  |  FINAL v4                    ║
 # ║   Funguje v: Google Colab aj GitHub Actions                     ║
 # ║   Zmeny v4: opravený SME filter + mapovanie Programme ID        ║
+# ║   Zmeny v4.1: FIX 6 – kontrola, že deadline ešte neprešiel      ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 # ══════════════════════════════════════════════════════════════════
@@ -176,6 +177,18 @@ def _ts_to_dt(ts_ms):
 def _nazov_programu(programme_id):
     return PROGRAMME_MAP.get(str(programme_id), str(programme_id))
 
+# ── FIX 6: Kontrola, či deadline výzvy ešte neprešiel ─────────
+# EC API niekedy nestihne aktualizovať pole "status" hneď po uzávierke,
+# takže sa nespoliehame len naň – overíme si dátum lokálne, voči dnešku (UTC).
+def _je_po_deadline(deadline_raw):
+    if not deadline_raw:
+        return False  # bez dátumu neblokujeme, necháme prejsť
+    try:
+        deadline_dt = datetime.strptime(deadline_raw[:10], "%Y-%m-%d").date()
+        return deadline_dt < datetime.now(timezone.utc).date()
+    except ValueError:
+        return False  # neparsovateľný dátum – neblokujeme
+
 # ══════════════════════════════════════════════════════════════════
 # KROK 1 – Search API → všetky unikátne výzvy
 # ══════════════════════════════════════════════════════════════════
@@ -257,6 +270,13 @@ def klasifikuj_vyzvu(hit, detail):
     popis    = _strip_html(detail.get('description', ''))
     fulltext = f"{nazov} {popis}".lower()
 
+    meta = hit['metadata']
+
+    # ── FIX 6: ak uzávierka už prešla, výzvu úplne zahodíme ──
+    deadline_raw = meta.get('deadlineDate', [''])[0][:10]
+    if _je_po_deadline(deadline_raw):
+        return None
+
     zhodne = [o for o in OBLAST_PORADIE if _obsahuje(fulltext, OBLASTI[o])]
     if not zhodne:
         if _obsahuje(fulltext, SME_KLUCOVE_SLOVA):
@@ -267,7 +287,6 @@ def klasifikuj_vyzvu(hit, detail):
     hlavna = "🏭 Strojárstvo / Industry 4.0"
     oblast = hlavna if hlavna in zhodne else zhodne[0]
 
-    meta       = hit['metadata']
     pub_ts     = detail.get('publicationDateLong', 0)
     pub_dt     = _ts_to_dt(pub_ts)
     prog_raw   = meta.get('frameworkProgramme', [''])[0]
@@ -282,7 +301,7 @@ def klasifikuj_vyzvu(hit, detail):
         "programme" : _nazov_programu(prog_raw),   # ← FIX 5: čitateľný názov
         "status"    : meta.get('status', [''])[0],
         "startDate" : meta.get('startDate', [''])[0][:10],
-        "deadline"  : meta.get('deadlineDate', [''])[0][:10],
+        "deadline"  : deadline_raw,
         "pub_datum" : pub_dt.strftime('%d.%m.%Y') if pub_dt else '—',
         "zhrnutie"  : _skrat(popis, 5),
         "link"      : meta.get('url', [''])[0],
